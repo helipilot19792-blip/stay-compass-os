@@ -2,34 +2,43 @@
 
 """
 Stay Compass Device Service
-
-This service is responsible for:
-- Device startup
-- Launching the Stay Compass PWA
-- Monitoring Chromium
-- Network checks
-- Future OTA updates
-- Device health
 """
 
+import logging
 import time
 
 
-def main():
-    print("===================================")
-    print(" Stay Compass Device Service")
-    print(" Version 0.1.0")
-    print("===================================")
+LOG_FILE = "/tmp/stay-compass-device.log"
 
-    print("Starting device service...")
+
+def setup_logging():
+    logging.basicConfig(
+        filename=LOG_FILE,
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s: %(message)s",
+    )
+
+
+def log(message):
+    print(message)
+    logging.info(message)
+
+
+def main():
+    setup_logging()
+
+    log("===================================")
+    log(" Stay Compass Device Service")
+    log(" Version 0.1.0")
+    log("===================================")
+    log("Starting device service...")
 
     try:
         while True:
-            print("Device service running...")
+            log("Device service running...")
             time.sleep(10)
     except KeyboardInterrupt:
-        print("")
-        print("Stay Compass Device Service stopped.")
+        log("Stay Compass Device Service stopped.")
 
 
 if __name__ == "__main__":
