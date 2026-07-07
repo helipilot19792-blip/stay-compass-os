@@ -17,5 +17,10 @@ fi
 sudo mkdir -p "$INSTALL_DIR"
 sudo cp "$SPLASH_SOURCE" "$INSTALL_DIR/splash.png"
 
+sudo cp "$PROJECT_DIR/services/stay-compass-splash.service" /etc/systemd/system/stay-compass-splash.service
+sudo systemctl daemon-reload
+sudo systemctl enable stay-compass-splash.service
+
 echo "Boot assets installed to $INSTALL_DIR"
+echo "Splash service installed."
 echo "Done."
