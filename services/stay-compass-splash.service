@@ -1,0 +1,13 @@
+[Unit]
+Description=Stay Compass Boot Splash
+Before=stay-compass-kiosk.service
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/fbi -T 1 -d /dev/fb0 -noverbose -a /opt/stay-compass/assets/splash.png
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
