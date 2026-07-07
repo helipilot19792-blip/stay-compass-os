@@ -1,0 +1,14 @@
+[Unit]
+Description=Stay Compass Kiosk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=compass
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/startx /opt/stay-compass/start-kiosk.sh -- :0 -nocursor
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
