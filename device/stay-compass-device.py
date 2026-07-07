@@ -5,10 +5,14 @@ Stay Compass Device Service
 """
 
 import logging
+import socket
 import time
 
 
 LOG_FILE = "/tmp/stay-compass-device.log"
+NETWORK_CHECK_HOST = "1.1.1.1"
+NETWORK_CHECK_PORT = 53
+NETWORK_TIMEOUT_SECONDS = 3
 
 
 def setup_logging():
@@ -24,6 +28,17 @@ def log(message):
     logging.info(message)
 
 
+def has_network():
+    try:
+        socket.create_connection(
+            (NETWORK_CHECK_HOST, NETWORK_CHECK_PORT),
+            timeout=NETWORK_TIMEOUT_SECONDS,
+        )
+        return True
+    except OSError:
+        return False
+
+
 def main():
     setup_logging()
 
@@ -35,7 +50,11 @@ def main():
 
     try:
         while True:
-            log("Device service running...")
+            if has_network():
+                log("Network online.")
+            else:
+                log("Network offline.")
+
             time.sleep(10)
     except KeyboardInterrupt:
         log("Stay Compass Device Service stopped.")
