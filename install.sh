@@ -14,6 +14,7 @@ echo ""
 
 bash "$SCRIPT_DIR/scripts/install-packages.sh"
 bash "$SCRIPT_DIR/scripts/install-splash.sh"
+bash "$SCRIPT_DIR/scripts/install-kiosk.sh"
 
 echo ""
 echo "Stay Compass OS $VERSION installation complete."
