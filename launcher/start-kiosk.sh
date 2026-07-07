@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 export DISPLAY=:0
 
 xset s off
@@ -12,7 +14,10 @@ openbox-session &
 
 sleep 2
 
-chromium \
+# Launch the Stay Compass PWA.
+# This will eventually be replaced by the Stay Compass Device Service.
+
+exec chromium \
   --kiosk \
   --app=https://stayinniagara.com/compass/ \
   --noerrdialogs \
