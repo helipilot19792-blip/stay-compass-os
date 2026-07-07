@@ -10,9 +10,7 @@ sudo apt install -y \
     curl \
     wget \
     chromium \
-    plymouth \
-    plymouth-themes \
-    initramfs-tools \
+    fbi \
     xserver-xorg \
     xinit \
     openbox \

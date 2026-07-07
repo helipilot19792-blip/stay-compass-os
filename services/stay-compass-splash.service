@@ -1,14 +1,12 @@
 [Unit]
-Description=Stay Compass Boot Splash Handoff
-DefaultDependencies=no
-After=local-fs.target plymouth-start.service
+Description=Stay Compass Boot Splash
 Before=stay-compass-kiosk.service
-Wants=plymouth-start.service
+DefaultDependencies=no
+After=local-fs.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/plymouth show-splash
-ExecStart=/usr/bin/plymouth change-mode --boot-up
+ExecStart=/usr/bin/fbi -T 1 -d /dev/fb0 -noverbose -a /opt/stay-compass/assets/splash.png
 RemainAfterExit=yes
 
 [Install]

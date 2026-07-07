@@ -1,8 +1,0 @@
-[Plymouth Theme]
-Name=Stay Compass
-Description=Stay Compass branded boot splash
-ModuleName=script
-
-[script]
-ImageDir=/usr/share/plymouth/themes/stay-compass
-ScriptFile=/usr/share/plymouth/themes/stay-compass/stay-compass.script

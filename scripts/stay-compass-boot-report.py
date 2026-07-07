@@ -128,7 +128,8 @@ def wait_for_chromium():
 
 
 def quit_plymouth():
-    run_command(["plymouth", "quit"])
+    if Path("/usr/bin/plymouth").exists():
+        run_command(["plymouth", "quit"])
 
 
 def write_report(report):
