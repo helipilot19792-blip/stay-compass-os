@@ -3,11 +3,8 @@ set -e
 
 echo "Stay Compass OS installer starting..."
 
-echo "Backing up current kiosk files..."
-mkdir -p backups
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-sudo cp /opt/stay-compass/start-kiosk.sh backups/start-kiosk.sh 2>/dev/null || true
-sudo cp /home/compass/.bash_profile backups/compass-bash-profile 2>/dev/null || true
+bash "$SCRIPT_DIR/scripts/install-packages.sh"
 
-echo "Backup complete."
-echo "Installer finished."
+echo "Stay Compass OS installer finished."
