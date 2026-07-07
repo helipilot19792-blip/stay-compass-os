@@ -7,6 +7,7 @@ Stay Compass Device Service
 import json
 import logging
 import socket
+import subprocess
 import time
 from pathlib import Path
 
@@ -18,6 +19,8 @@ LOG_FILE = "/tmp/stay-compass-device.log"
 NETWORK_CHECK_HOST = "1.1.1.1"
 NETWORK_CHECK_PORT = 53
 NETWORK_TIMEOUT_SECONDS = 3
+
+CHROMIUM_BIN = "/usr/bin/chromium"
 
 
 def setup_logging():
@@ -49,6 +52,21 @@ def has_network():
         return False
 
 
+def launch_chromium(pwa_url):
+    log("Launching Chromium...")
+
+    return subprocess.Popen(
+        [
+            CHROMIUM_BIN,
+            "--kiosk",
+            "--noerrdialogs",
+            "--disable-infobars",
+            "--disable-session-crashed-bubble",
+            pwa_url,
+        ]
+    )
+
+
 def main():
     setup_logging()
     config = load_config()
@@ -61,16 +79,30 @@ def main():
     log(f"PWA URL: {pwa_url}")
     log("Starting device service...")
 
+    chromium_process = None
+
     try:
         while True:
-            if has_network():
-                log("Network online.")
-            else:
-                log("Network offline.")
+            if not has_network():
+                log("Network offline. Waiting...")
+                time.sleep(10)
+                continue
 
-            time.sleep(10)
+            if chromium_process is None:
+                chromium_process = launch_chromium(pwa_url)
+
+            if chromium_process.poll() is not None:
+                log("Chromium exited. Restarting...")
+                chromium_process = launch_chromium(pwa_url)
+
+            time.sleep(5)
+
     except KeyboardInterrupt:
         log("Stay Compass Device Service stopped.")
+
+        if chromium_process is not None and chromium_process.poll() is None:
+            log("Stopping Chromium...")
+            chromium_process.terminate()
 
 
 if __name__ == "__main__":
