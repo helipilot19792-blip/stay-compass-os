@@ -1,0 +1,3 @@
+if [ -z "$DISPLAY" ] && [ "$(tty)" = "/dev/tty1" ]; then
+  startx /opt/stay-compass/start-kiosk.sh -- -nocursor
+fi
