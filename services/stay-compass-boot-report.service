@@ -1,0 +1,12 @@
+[Unit]
+Description=Stay Compass Boot Performance Report
+After=stay-compass-kiosk.service
+Wants=stay-compass-kiosk.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/stay-compass/bin/stay-compass-boot-report.py
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

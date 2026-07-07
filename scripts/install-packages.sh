@@ -10,9 +10,13 @@ sudo apt install -y \
     curl \
     wget \
     chromium \
+    plymouth \
+    plymouth-themes \
+    initramfs-tools \
     xserver-xorg \
     xinit \
     openbox \
-    unclutter
+    unclutter \
+    xdotool
 
 echo "Package installation complete."

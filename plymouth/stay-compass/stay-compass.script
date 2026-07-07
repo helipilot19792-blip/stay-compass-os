@@ -1,0 +1,20 @@
+Window.SetBackgroundTopColor(0.0, 0.0, 0.0);
+Window.SetBackgroundBottomColor(0.0, 0.0, 0.0);
+
+logo_image = Image("splash.png");
+logo_sprite = Sprite();
+
+fun center_logo() {
+    screen_width = Window.GetWidth();
+    screen_height = Window.GetHeight();
+    logo_width = logo_image.GetWidth();
+    logo_height = logo_image.GetHeight();
+
+    logo_sprite.SetImage(logo_image);
+    logo_sprite.SetX((screen_width - logo_width) / 2);
+    logo_sprite.SetY((screen_height - logo_height) / 2);
+    logo_sprite.SetZ(100);
+}
+
+Plymouth.SetRefreshFunction(center_logo);
+center_logo();
