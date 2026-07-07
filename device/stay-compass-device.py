@@ -23,9 +23,13 @@ def main():
 
     print("Starting device service...")
 
-    while True:
-        print("Device service running...")
-        time.sleep(10)
+    try:
+        while True:
+            print("Device service running...")
+            time.sleep(10)
+    except KeyboardInterrupt:
+        print("")
+        print("Stay Compass Device Service stopped.")
 
 
 if __name__ == "__main__":
