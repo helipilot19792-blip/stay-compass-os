@@ -4,10 +4,15 @@
 Stay Compass Device Service
 """
 
+import json
 import logging
 import socket
 import time
+from pathlib import Path
 
+
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = BASE_DIR / "config.json"
 
 LOG_FILE = "/tmp/stay-compass-device.log"
 NETWORK_CHECK_HOST = "1.1.1.1"
@@ -28,6 +33,11 @@ def log(message):
     logging.info(message)
 
 
+def load_config():
+    with open(CONFIG_FILE, "r", encoding="utf-8") as config_file:
+        return json.load(config_file)
+
+
 def has_network():
     try:
         socket.create_connection(
@@ -41,11 +51,14 @@ def has_network():
 
 def main():
     setup_logging()
+    config = load_config()
+    pwa_url = config.get("pwa_url")
 
     log("===================================")
     log(" Stay Compass Device Service")
     log(" Version 0.1.0")
     log("===================================")
+    log(f"PWA URL: {pwa_url}")
     log("Starting device service...")
 
     try:
