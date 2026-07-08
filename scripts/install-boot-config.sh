@@ -105,6 +105,6 @@ required_parts = [
 cmdline_path.write_text(" ".join(filtered_parts + required_parts) + "\n", encoding="utf-8")
 PY
 
-sudo systemctl mask getty@tty1.service >/dev/null 2>&1 || true
+sudo systemctl unmask getty@tty1.service >/dev/null 2>&1 || true
 
 echo "Silent boot configuration applied."
