@@ -4,5 +4,15 @@
   "auto_update_on_boot": true,
   "update_repo_dir": "",
   "update_remote": "origin",
-  "update_branch": "main"
+  "update_branch": "main",
+  "display": {
+    "night_mode_enabled": false,
+    "night_start": "21:00",
+    "night_end": "07:00",
+    "day_brightness": 1.0,
+    "night_brightness": 0.3,
+    "wake_brightness": 1.0,
+    "wake_duration_seconds": 120,
+    "xrandr_output": "HDMI-1"
+  }
 }
