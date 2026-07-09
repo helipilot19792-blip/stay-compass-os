@@ -55,6 +55,9 @@ ADMIN_HTML = """<!doctype html>
       place-items: center;
       padding: 28px;
     }
+    body.keyboard-open {
+      padding-bottom: 260px;
+    }
     main {
       width: min(920px, 100%);
       background: #ffffff;
@@ -120,6 +123,45 @@ ADMIN_HTML = """<!doctype html>
       background: #e8edf1;
       color: #23313f;
     }
+    .touch-keyboard {
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 20;
+      padding: 12px;
+      background: #101820;
+      border-top: 4px solid #155c5f;
+      box-shadow: 0 -16px 40px rgba(16, 24, 32, 0.22);
+    }
+    .keyboard-inner {
+      width: min(920px, 100%);
+      margin: 0 auto;
+      display: grid;
+      gap: 8px;
+    }
+    .keyboard-row {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+    }
+    .keyboard-key {
+      min-width: 0;
+      min-height: 46px;
+      flex: 1 1 0;
+      padding: 8px 10px;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: #24313d;
+      color: #ffffff;
+      border-radius: 6px;
+      font-size: 18px;
+    }
+    .keyboard-key.wide { flex-grow: 1.6; }
+    .keyboard-key.extra-wide { flex-grow: 4; }
+    .keyboard-key.active {
+      background: #f0b429;
+      color: #101820;
+    }
     .actions {
       display: flex;
       gap: 10px;
@@ -149,10 +191,13 @@ ADMIN_HTML = """<!doctype html>
     dd { margin: 0; color: #53616f; word-break: break-word; }
     @media (max-width: 760px) {
       body { padding: 14px; place-items: stretch; }
+      body.keyboard-open { padding-bottom: 260px; }
       header, section { padding: 20px; }
       header { display: block; }
       .status { text-align: left; margin-top: 12px; }
       .grid, .locked { grid-template-columns: 1fr; }
+      .keyboard-key { min-height: 42px; padding: 7px 8px; font-size: 16px; }
+      .touch-keyboard { padding: 10px 8px; }
     }
   </style>
 </head>
@@ -208,6 +253,7 @@ ADMIN_HTML = """<!doctype html>
       </dl>
     </section>
   </main>
+  <div id="touchKeyboard" class="touch-keyboard hidden" aria-label="Touch keyboard"></div>
   <script>
     const els = {
       appUrl: document.querySelector("#appUrl"),
@@ -224,6 +270,7 @@ ADMIN_HTML = """<!doctype html>
       screenDescription: document.querySelector("#screenDescription"),
       scan: document.querySelector("#scan"),
       ssid: document.querySelector("#ssid"),
+      touchKeyboard: document.querySelector("#touchKeyboard"),
       unlock: document.querySelector("#unlock"),
       unlockPin: document.querySelector("#unlockPin"),
       wifiSection: document.querySelector("#wifiSection")
@@ -269,6 +316,139 @@ ADMIN_HTML = """<!doctype html>
       els.wifiSection.classList.remove("hidden");
       els.diagnosticsSection.classList.remove("hidden");
       els.screenDescription.textContent = "Device setup, Wi-Fi recovery, and local diagnostics.";
+      hideTouchKeyboard();
+    }
+
+    function hideTouchKeyboard() {
+      els.touchKeyboard.classList.add("hidden");
+      document.body.classList.remove("keyboard-open");
+    }
+
+    function showTouchKeyboard(input) {
+      activeKeyboardInput = input;
+      els.touchKeyboard.classList.remove("hidden");
+      document.body.classList.add("keyboard-open");
+      renderTouchKeyboard();
+    }
+
+    let activeKeyboardInput = null;
+    let keyboardShift = false;
+    let keyboardCaps = false;
+
+    function keyboardLetter(value) {
+      return keyboardShift || keyboardCaps ? value.toUpperCase() : value;
+    }
+
+    function inputText(value) {
+      if (!activeKeyboardInput) return;
+      activeKeyboardInput.focus();
+      const start = activeKeyboardInput.selectionStart ?? activeKeyboardInput.value.length;
+      const end = activeKeyboardInput.selectionEnd ?? activeKeyboardInput.value.length;
+      activeKeyboardInput.setRangeText(value, start, end, "end");
+      activeKeyboardInput.dispatchEvent(new Event("input", { bubbles: true }));
+      if (keyboardShift && !keyboardCaps) {
+        keyboardShift = false;
+        renderTouchKeyboard();
+      }
+    }
+
+    function backspaceInput() {
+      if (!activeKeyboardInput) return;
+      activeKeyboardInput.focus();
+      const start = activeKeyboardInput.selectionStart ?? activeKeyboardInput.value.length;
+      const end = activeKeyboardInput.selectionEnd ?? activeKeyboardInput.value.length;
+      if (start !== end) {
+        activeKeyboardInput.setRangeText("", start, end, "end");
+      } else if (start > 0) {
+        activeKeyboardInput.setRangeText("", start - 1, start, "end");
+      }
+      activeKeyboardInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    function keyboardButton(label, options = {}) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `keyboard-key ${options.className || ""}`.trim();
+      button.textContent = label;
+      if (options.active) {
+        button.classList.add("active");
+      }
+      button.addEventListener("click", () => options.onClick());
+      return button;
+    }
+
+    function addKeyboardRow(container, keys) {
+      const row = document.createElement("div");
+      row.className = "keyboard-row";
+      for (const key of keys) {
+        if (typeof key === "string") {
+          row.appendChild(keyboardButton(keyboardLetter(key), { onClick: () => inputText(keyboardLetter(key)) }));
+        } else {
+          row.appendChild(keyboardButton(key.label, key));
+        }
+      }
+      container.appendChild(row);
+    }
+
+    // Touch keyboard is initialized here so the local admin/setup page works offline on kiosk touchscreens.
+    function initTouchKeyboard() {
+      const textInputs = document.querySelectorAll('input[type="text"], input[type="password"], input:not([type])');
+      for (const input of textInputs) {
+        input.addEventListener("focus", () => showTouchKeyboard(input));
+      }
+
+      els.touchKeyboard.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+      });
+
+      document.addEventListener("pointerdown", (event) => {
+        const target = event.target;
+        if (els.touchKeyboard.contains(target) || target.matches('input[type="text"], input[type="password"], input:not([type])')) {
+          return;
+        }
+        hideTouchKeyboard();
+      });
+    }
+
+    function renderTouchKeyboard() {
+      els.touchKeyboard.innerHTML = "";
+      const inner = document.createElement("div");
+      inner.className = "keyboard-inner";
+
+      addKeyboardRow(inner, ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]);
+      addKeyboardRow(inner, ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"]);
+      addKeyboardRow(inner, ["a", "s", "d", "f", "g", "h", "j", "k", "l"]);
+      addKeyboardRow(inner, [
+        { label: "Shift", className: "wide", active: keyboardShift, onClick: () => { keyboardShift = !keyboardShift; renderTouchKeyboard(); } },
+        "z", "x", "c", "v", "b", "n", "m",
+        { label: "Back", className: "wide", onClick: backspaceInput }
+      ]);
+      addKeyboardRow(inner, [
+        { label: "Caps", className: "wide", active: keyboardCaps, onClick: () => { keyboardCaps = !keyboardCaps; renderTouchKeyboard(); } },
+        { label: "!", onClick: () => inputText("!") },
+        { label: "@", onClick: () => inputText("@") },
+        { label: "#", onClick: () => inputText("#") },
+        { label: "$", onClick: () => inputText("$") },
+        { label: "%", onClick: () => inputText("%") },
+        { label: "&", onClick: () => inputText("&") },
+        { label: "*", onClick: () => inputText("*") },
+        { label: "?", onClick: () => inputText("?") },
+        { label: "Done", className: "wide", onClick: () => { hideTouchKeyboard(); if (activeKeyboardInput) activeKeyboardInput.blur(); } }
+      ]);
+      addKeyboardRow(inner, [
+        { label: "-", onClick: () => inputText("-") },
+        { label: "_", onClick: () => inputText("_") },
+        { label: "+", onClick: () => inputText("+") },
+        { label: "=", onClick: () => inputText("=") },
+        { label: ".", onClick: () => inputText(".") },
+        { label: ",", onClick: () => inputText(",") },
+        { label: "/", onClick: () => inputText("/") },
+        { label: ":", onClick: () => inputText(":") },
+        { label: ";", onClick: () => inputText(";") },
+        { label: "Space", className: "extra-wide", onClick: () => inputText(" ") }
+      ]);
+
+      els.touchKeyboard.appendChild(inner);
     }
 
     async function unlockAdmin() {
@@ -323,6 +503,7 @@ ADMIN_HTML = """<!doctype html>
       }
     });
 
+    initTouchKeyboard();
     refreshStatus().catch((error) => setMessage(error.message));
     window.setInterval(() => {
       if (adminPin) {
