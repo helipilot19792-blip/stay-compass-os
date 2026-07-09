@@ -10,6 +10,7 @@ sudo apt install -y \
     curl \
     wget \
     chromium \
+    network-manager \
     fbi \
     xserver-xorg \
     xinit \

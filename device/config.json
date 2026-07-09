@@ -1,3 +1,8 @@
 {
-  "pwa_url": "https://stayinniagara.com/compass/"
+  "pwa_url": "https://stayinniagara.com/compass/",
+  "admin_pin": "2468",
+  "auto_update_on_boot": true,
+  "update_repo_dir": "",
+  "update_remote": "origin",
+  "update_branch": "main"
 }
