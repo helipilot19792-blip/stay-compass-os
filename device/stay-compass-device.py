@@ -367,6 +367,7 @@ ADMIN_HTML = """<!doctype html>
     const TEXT_INPUT_SELECTOR = 'input[type="text"], input[type="password"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"], input:not([type]), textarea';
     const KEYBOARD_MARGIN = 16;
     const ADMIN_ACTIVITY_PING_MS = 5000;
+    const LOCAL_ADMIN_API_BASE = "http://127.0.0.1:8750";
 
     let adminPin = "";
     let lastAdminActivityPingAt = 0;
@@ -694,7 +695,7 @@ ADMIN_HTML = """<!doctype html>
     }
 
     async function loadDisplaySettings() {
-      const data = await api(`/api/display-settings?pin=${encodeURIComponent(adminPin)}`);
+      const data = await api(`${LOCAL_ADMIN_API_BASE}/api/display-settings?pin=${encodeURIComponent(adminPin)}`);
       fillDisplaySettings(data.display);
       setDisplayWarning(data.warning || "");
       setDisplayMessage(data.message || "");
@@ -702,7 +703,7 @@ ADMIN_HTML = """<!doctype html>
 
     async function saveDisplaySettings() {
       setDisplayMessage("Saving display settings...");
-      const data = await api("/api/display-settings", {
+      const data = await api(`${LOCAL_ADMIN_API_BASE}/api/display-settings`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -718,7 +719,7 @@ ADMIN_HTML = """<!doctype html>
     async function previewNightMode() {
       setDisplayMessage("Applying night preview...");
       const body = new URLSearchParams({ pin: adminPin });
-      const data = await api("/api/display-preview-night", { method: "POST", body });
+      const data = await api(`${LOCAL_ADMIN_API_BASE}/api/display-preview-night`, { method: "POST", body });
       setDisplayWarning(data.warning || "");
       setDisplayMessage(data.message || "Night mode preview applied.");
       await refreshAdminStatus();
@@ -727,7 +728,7 @@ ADMIN_HTML = """<!doctype html>
     async function restoreFullBrightness() {
       setDisplayMessage("Restoring full brightness...");
       const body = new URLSearchParams({ pin: adminPin });
-      const data = await api("/api/display-restore-brightness", { method: "POST", body });
+      const data = await api(`${LOCAL_ADMIN_API_BASE}/api/display-restore-brightness`, { method: "POST", body });
       setDisplayWarning(data.warning || "");
       setDisplayMessage(data.message || "Full brightness restored.");
       await refreshAdminStatus();
