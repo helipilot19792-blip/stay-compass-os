@@ -12,6 +12,8 @@ import subprocess
 import sys
 import threading
 import time
+from ctypes import POINTER, Structure, Union, byref, c_char_p, c_int, c_long, c_uint, c_ulong, c_void_p
+from ctypes.util import find_library
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -29,8 +31,11 @@ OFFLINE_ADMIN_DELAY_SECONDS = 20
 ADMIN_HOST = "127.0.0.1"
 ADMIN_PORT = 8750
 UPDATE_HELPER = "/opt/stay-compass/run-update.sh"
-ADMIN_OVERLAY_SIZE = 56
-ADMIN_OVERLAY_ALPHA = 0.01
+ADMIN_OVERLAY_SIZE = 28
+ADMIN_OVERLAY_ALPHA = 0.05
+ADMIN_INACTIVITY_TIMEOUT_SECONDS = 30
+ADMIN_LOCKOUT_SECONDS = 5 * 60
+ADMIN_OVERRIDE_SECONDS = 90
 
 CHROMIUM_BIN = "/usr/bin/chromium"
 NMCLI_BIN = "/usr/bin/nmcli"
@@ -285,8 +290,10 @@ ADMIN_HTML = """<!doctype html>
     };
     const TEXT_INPUT_SELECTOR = 'input[type="text"], input[type="password"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"], input:not([type]), textarea';
     const KEYBOARD_MARGIN = 16;
+    const ADMIN_ACTIVITY_PING_MS = 5000;
 
     let adminPin = "";
+    let lastAdminActivityPingAt = 0;
 
     function setMessage(text) {
       els.message.textContent = text;
@@ -321,12 +328,22 @@ ADMIN_HTML = """<!doctype html>
       els.networkStatus.style.color = status.online ? "#155c5f" : "#8a2d16";
     }
 
+    function noteAdminActivity(force = false) {
+      const now = Date.now();
+      if (!force && now - lastAdminActivityPingAt < ADMIN_ACTIVITY_PING_MS) {
+        return;
+      }
+      lastAdminActivityPingAt = now;
+      fetch("/api/activity", { method: "POST" }).catch(() => {});
+    }
+
     function showAdmin() {
       els.lockSection.classList.add("hidden");
       els.wifiSection.classList.remove("hidden");
       els.diagnosticsSection.classList.remove("hidden");
       els.screenDescription.textContent = "Device setup, Wi-Fi recovery, and local diagnostics.";
       hideTouchKeyboard();
+      noteAdminActivity(true);
     }
 
     function isKeyboardInput(element) {
@@ -577,7 +594,12 @@ ADMIN_HTML = """<!doctype html>
       }
     });
 
+    ["pointerdown", "keydown", "input", "focusin"].forEach((eventName) => {
+      document.addEventListener(eventName, () => noteAdminActivity(), true);
+    });
+
     initTouchKeyboard();
+    noteAdminActivity(true);
     refreshStatus().catch((error) => setMessage(error.message));
     window.setInterval(() => {
       if (adminPin) {
@@ -758,6 +780,92 @@ def launch_chromium(url):
     )
 
 
+def monotonic_seconds():
+    return time.monotonic()
+
+
+def set_admin_deadline(state, source):
+    deadline = monotonic_seconds() + ADMIN_INACTIVITY_TIMEOUT_SECONDS
+    with state["lock"]:
+        state["admin_deadline"] = deadline
+    return deadline
+
+
+def clear_admin_session(state):
+    with state["lock"]:
+        state["admin_deadline"] = 0.0
+        state["admin_override_until"] = 0.0
+
+
+def request_app_mode(state, source):
+    with state["lock"]:
+        state["requested_mode"] = "app"
+        state["admin_deadline"] = 0.0
+        state["admin_override_until"] = 0.0
+    log(f"App mode requested from {source}.")
+
+
+def request_admin_mode(state, source, bypass_lockout=False):
+    now = monotonic_seconds()
+
+    with state["lock"]:
+        lockout_until = state.get("admin_lockout_until", 0.0)
+        override_active = state.get("admin_override_until", 0.0) > now
+
+        if lockout_until > now and not (bypass_lockout or override_active):
+            remaining = max(1, int(lockout_until - now))
+            log(f"Admin request ignored from {source}; lockout active for {remaining}s more.")
+            return False
+
+        if bypass_lockout:
+            state["admin_override_until"] = now + ADMIN_OVERRIDE_SECONDS
+            log("Admin override armed via Ctrl+Alt+A.")
+
+        state["requested_mode"] = "admin"
+        state["admin_deadline"] = now + ADMIN_INACTIVITY_TIMEOUT_SECONDS
+
+    log(f"Admin mode requested from {source}.")
+    return True
+
+
+def record_admin_activity(state, source):
+    deadline = set_admin_deadline(state, source)
+    log(f"Admin activity detected from {source}; timeout reset to {int(deadline - monotonic_seconds())}s.")
+
+
+def admin_lockout_remaining(state):
+    with state["lock"]:
+        return max(0, int(state.get("admin_lockout_until", 0.0) - monotonic_seconds()))
+
+
+class XKeyEvent(Structure):
+    _fields_ = [
+        ("type", c_int),
+        ("serial", c_ulong),
+        ("send_event", c_int),
+        ("display", c_void_p),
+        ("window", c_ulong),
+        ("root", c_ulong),
+        ("subwindow", c_ulong),
+        ("time", c_ulong),
+        ("x", c_int),
+        ("y", c_int),
+        ("x_root", c_int),
+        ("y_root", c_int),
+        ("state", c_uint),
+        ("keycode", c_uint),
+        ("same_screen", c_int),
+    ]
+
+
+class XEvent(Union):
+    _fields_ = [
+        ("type", c_int),
+        ("xkey", XKeyEvent),
+        ("pad", c_long * 24),
+    ]
+
+
 def start_admin_overlay(state):
     if not os.environ.get("DISPLAY"):
         log("Admin overlay skipped: DISPLAY is not set.")
@@ -774,6 +882,10 @@ def start_admin_overlay(state):
         root.overrideredirect(True)
         root.configure(bg="#ffffff")
         root.attributes("-topmost", True)
+        try:
+            root.wm_attributes("-type", "dock")
+        except tk.TclError:
+            log("Admin overlay window type hint unavailable; continuing with topmost mode.")
 
         try:
             root.attributes("-alpha", ADMIN_OVERLAY_ALPHA)
@@ -781,20 +893,33 @@ def start_admin_overlay(state):
             log("Admin overlay transparency not supported; using fallback alpha.")
 
         screen_width = root.winfo_screenwidth()
-        geometry = f"{ADMIN_OVERLAY_SIZE}x{ADMIN_OVERLAY_SIZE}+{max(0, screen_width - ADMIN_OVERLAY_SIZE)}+0"
+        screen_height = root.winfo_screenheight()
+        geometry = (
+            f"{ADMIN_OVERLAY_SIZE}x{ADMIN_OVERLAY_SIZE}"
+            f"+{max(0, screen_width - ADMIN_OVERLAY_SIZE)}"
+            f"+{max(0, screen_height - ADMIN_OVERLAY_SIZE)}"
+        )
         root.geometry(geometry)
 
-        hitbox = tk.Frame(root, width=ADMIN_OVERLAY_SIZE, height=ADMIN_OVERLAY_SIZE, bg="#ffffff", highlightthickness=0, bd=0)
+        hitbox = tk.Frame(
+            root,
+            width=ADMIN_OVERLAY_SIZE,
+            height=ADMIN_OVERLAY_SIZE,
+            bg="#ffffff",
+            highlightthickness=0,
+            bd=0,
+        )
         hitbox.pack(fill="both", expand=True)
         hitbox.pack_propagate(False)
 
         visible = {"shown": False}
 
         def open_admin(_event=None):
-            state["requested_mode"] = "admin"
-            state["overlay_visible"] = False
-            root.withdraw()
-            visible["shown"] = False
+            log("Admin overlay tap detected.")
+            if request_admin_mode(state, "overlay tap"):
+                state["overlay_visible"] = False
+                root.withdraw()
+                visible["shown"] = False
 
         def sync_overlay():
             if state.get("shutdown"):
@@ -814,7 +939,7 @@ def start_admin_overlay(state):
 
             root.after(250, sync_overlay)
 
-        hitbox.bind("<Button-1>", open_admin)
+        hitbox.bind("<ButtonPress-1>", open_admin)
         root.withdraw()
         sync_overlay()
         root.mainloop()
@@ -822,6 +947,95 @@ def start_admin_overlay(state):
     thread = threading.Thread(target=run_overlay, daemon=True)
     thread.start()
     log("Admin overlay started.")
+    return thread
+
+
+def start_admin_hotkey_listener(state):
+    if not os.environ.get("DISPLAY"):
+        log("Admin hotkey listener skipped: DISPLAY is not set.")
+        return None
+
+    x11_path = find_library("X11")
+
+    if not x11_path:
+        log("Admin hotkey listener unavailable: libX11 not found.")
+        return None
+
+    def run_hotkey_listener():
+        try:
+            from ctypes import CDLL
+
+            x11 = CDLL(x11_path)
+            x11.XOpenDisplay.argtypes = [c_char_p]
+            x11.XOpenDisplay.restype = c_void_p
+            x11.XDefaultScreen.argtypes = [c_void_p]
+            x11.XDefaultScreen.restype = c_int
+            x11.XRootWindow.argtypes = [c_void_p, c_int]
+            x11.XRootWindow.restype = c_ulong
+            x11.XStringToKeysym.argtypes = [c_char_p]
+            x11.XStringToKeysym.restype = c_ulong
+            x11.XKeysymToKeycode.argtypes = [c_void_p, c_ulong]
+            x11.XKeysymToKeycode.restype = c_uint
+            x11.XGrabKey.argtypes = [c_void_p, c_int, c_uint, c_ulong, c_int, c_int, c_int]
+            x11.XGrabKey.restype = c_int
+            x11.XUngrabKey.argtypes = [c_void_p, c_int, c_uint, c_ulong]
+            x11.XPending.argtypes = [c_void_p]
+            x11.XPending.restype = c_int
+            x11.XNextEvent.argtypes = [c_void_p, POINTER(XEvent)]
+            x11.XSync.argtypes = [c_void_p, c_int]
+            x11.XCloseDisplay.argtypes = [c_void_p]
+
+            display = x11.XOpenDisplay(None)
+            if not display:
+                log("Admin hotkey listener unavailable: unable to open X display.")
+                return
+
+            screen = x11.XDefaultScreen(display)
+            root_window = x11.XRootWindow(display, screen)
+            keysym = x11.XStringToKeysym(b"a")
+            keycode = x11.XKeysymToKeycode(display, keysym)
+
+            if not keycode:
+                log("Admin hotkey listener unavailable: unable to resolve keycode for A.")
+                x11.XCloseDisplay(display)
+                return
+
+            control_mask = 0x04
+            mod1_mask = 0x08
+            lock_mask = 0x02
+            mod2_mask = 0x10
+            any_modifiers = [
+                control_mask | mod1_mask,
+                control_mask | mod1_mask | lock_mask,
+                control_mask | mod1_mask | mod2_mask,
+                control_mask | mod1_mask | lock_mask | mod2_mask,
+            ]
+
+            for modifiers in any_modifiers:
+                x11.XGrabKey(display, keycode, modifiers, root_window, 1, 1, 1)
+
+            x11.XSync(display, 0)
+            log("Admin hotkey listener started for Ctrl+Alt+A.")
+
+            event = XEvent()
+            while not state.get("shutdown"):
+                if x11.XPending(display) <= 0:
+                    time.sleep(0.1)
+                    continue
+
+                x11.XNextEvent(display, byref(event))
+                if event.type == 2:
+                    log("Admin hotkey detected.")
+                    request_admin_mode(state, "Ctrl+Alt+A", bypass_lockout=True)
+
+            for modifiers in any_modifiers:
+                x11.XUngrabKey(display, keycode, modifiers, root_window)
+            x11.XCloseDisplay(display)
+        except Exception as error:
+            log(f"Admin hotkey listener failed: {error}")
+
+    thread = threading.Thread(target=run_hotkey_listener, daemon=True)
+    thread.start()
     return thread
 
 
@@ -1019,6 +1233,7 @@ def make_admin_handler(config, state):
 
         def do_GET(self):
             if self.path == "/" or self.path == "/admin":
+                record_admin_activity(state, "admin page load")
                 body = ADMIN_HTML.encode("utf-8")
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1051,16 +1266,67 @@ def make_admin_handler(config, state):
             self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
         def do_POST(self):
+            if self.path == "/api/activity":
+                record_admin_activity(state, "admin page activity")
+                self.send_json({"ok": True})
+                return
+
             if self.path == "/api/unlock":
                 form = self.read_form()
 
+                now = monotonic_seconds()
+                with state["lock"]:
+                    override_active = state.get("admin_override_until", 0.0) > now
+                    lockout_until = state.get("admin_lockout_until", 0.0)
+
+                    if lockout_until > now and not override_active:
+                        remaining = max(1, int(lockout_until - now))
+                        log(f"Admin PIN blocked by lockout; {remaining}s remaining.")
+                        self.send_json(
+                            {
+                                "error": (
+                                    "Admin access is locked for 5 minutes after repeated "
+                                    "invalid PIN attempts."
+                                )
+                            },
+                            status=HTTPStatus.TOO_MANY_REQUESTS,
+                        )
+                        return
+
                 if not valid_admin_pin(config, form):
+                    with state["lock"]:
+                        if state.get("admin_override_until", 0.0) > now:
+                            log("Wrong admin PIN entered during override mode.")
+                        else:
+                            state["admin_failed_attempts"] = state.get("admin_failed_attempts", 0) + 1
+                            failed_attempts = state["admin_failed_attempts"]
+                            log(f"Wrong admin PIN attempt {failed_attempts}/3.")
+
+                            if failed_attempts >= 3:
+                                state["admin_failed_attempts"] = 0
+                                state["admin_lockout_until"] = now + ADMIN_LOCKOUT_SECONDS
+                                state["requested_mode"] = "app"
+                                state["admin_deadline"] = 0.0
+                                log("Admin access locked for 5 minutes after 3 failed PIN attempts.")
+                                self.send_json(
+                                    {
+                                        "error": (
+                                            "Too many invalid PIN attempts. "
+                                            "Admin access is locked for 5 minutes."
+                                        )
+                                    },
+                                    status=HTTPStatus.TOO_MANY_REQUESTS,
+                                )
+                                return
+
                     self.send_json(
                         {"error": "Invalid admin PIN."},
                         status=HTTPStatus.UNAUTHORIZED,
                     )
                     return
 
+                with state["lock"]:
+                    state["admin_failed_attempts"] = 0
                 self.send_json({"message": "Admin mode unlocked."})
                 return
 
@@ -1139,7 +1405,7 @@ def make_admin_handler(config, state):
                 return
 
             if self.path == "/api/open-app":
-                state["requested_mode"] = "app"
+                request_app_mode(state, "admin page button")
                 self.send_json({"message": "Opening Stay Compass..."})
                 return
 
@@ -1164,9 +1430,14 @@ def main():
     admin_url = f"http://{ADMIN_HOST}:{ADMIN_PORT}/"
     state = {
         "chromium_process": None,
+        "lock": threading.Lock(),
         "overlay_visible": False,
         "requested_mode": None,
         "shutdown": False,
+        "admin_deadline": 0.0,
+        "admin_failed_attempts": 0,
+        "admin_lockout_until": 0.0,
+        "admin_override_until": 0.0,
         "update": {
             "phase": "Preparing",
             "progress": 0,
@@ -1185,6 +1456,7 @@ def main():
 
     start_admin_server(config, state)
     start_admin_overlay(state)
+    start_admin_hotkey_listener(state)
 
     chromium_process = None
     current_mode = None
@@ -1195,6 +1467,10 @@ def main():
         while True:
             online = has_network()
             target_mode = "app"
+
+            with state["lock"]:
+                requested_mode = state.get("requested_mode")
+                admin_deadline = state.get("admin_deadline", 0.0)
 
             if not online:
                 if offline_since is None:
@@ -1215,9 +1491,18 @@ def main():
                     chromium_process = state.get("chromium_process")
                     current_mode = "update" if chromium_process else None
 
-            if state.get("requested_mode") == "app":
-                target_mode = "app"
-                state["requested_mode"] = None
+            if current_mode == "admin" and admin_deadline and admin_deadline <= monotonic_seconds():
+                log("Admin inactivity timeout reached; returning to Stay Compass app.")
+                request_app_mode(state, "admin inactivity timeout")
+                with state["lock"]:
+                    requested_mode = state.get("requested_mode")
+
+            if requested_mode in {"app", "admin"}:
+                target_mode = requested_mode
+                with state["lock"]:
+                    state["requested_mode"] = None
+            elif current_mode == "admin":
+                target_mode = "admin"
 
             target_url = pwa_url if target_mode == "app" else admin_url
 
@@ -1233,13 +1518,16 @@ def main():
                 current_mode = target_mode
                 state["overlay_visible"] = current_mode == "app"
 
+                if current_mode != "admin":
+                    clear_admin_session(state)
+
             if chromium_process.poll() is not None:
                 log("Chromium exited. Restarting current mode...")
                 chromium_process = launch_chromium(target_url)
                 state["chromium_process"] = chromium_process
                 state["overlay_visible"] = current_mode == "app"
 
-            time.sleep(5)
+            time.sleep(1 if current_mode == "admin" else 5)
 
     except KeyboardInterrupt:
         log("Stay Compass Device Service stopped.")
