@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from http import HTTPStatus
@@ -367,10 +368,12 @@ ADMIN_HTML = """<!doctype html>
     const TEXT_INPUT_SELECTOR = 'input[type="text"], input[type="password"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"], input:not([type]), textarea';
     const KEYBOARD_MARGIN = 16;
     const ADMIN_ACTIVITY_PING_MS = 5000;
+    const ADMIN_PIN_GUARD_MS = 700;
     const LOCAL_ADMIN_API_BASE = "http://127.0.0.1:8750";
 
     let adminPin = "";
     let lastAdminActivityPingAt = 0;
+    let unlockPinReadyAt = 0;
 
     function setMessage(text) {
       els.message.textContent = text;
@@ -387,6 +390,15 @@ ADMIN_HTML = """<!doctype html>
     function setDisplayWarning(text) {
       els.displayWarning.textContent = text || "";
       els.displayWarning.style.color = text ? "#8a2d16" : "#155c5f";
+    }
+
+    function prepareUnlockPinInput() {
+      unlockPinReadyAt = Date.now() + ADMIN_PIN_GUARD_MS;
+      els.unlockPin.value = "";
+      window.setTimeout(() => {
+        els.unlockPin.value = "";
+        els.unlockPin.focus();
+      }, ADMIN_PIN_GUARD_MS);
     }
 
     async function api(path, options = {}) {
@@ -683,14 +695,16 @@ ADMIN_HTML = """<!doctype html>
     function readDisplaySettingsPayload() {
       return {
         pin: adminPin,
-        night_mode_enabled: els.displayNightModeEnabled.value,
-        night_start: els.displayNightStart.value,
-        night_end: els.displayNightEnd.value,
-        day_brightness: String(percentToBrightness(els.displayDayBrightness.value)),
-        night_brightness: String(percentToBrightness(els.displayNightBrightness.value)),
-        wake_brightness: String(percentToBrightness(els.displayWakeBrightness.value)),
-        wake_duration_seconds: els.displayWakeDurationSeconds.value,
-        xrandr_output: els.displayXrandrOutput.value
+        display: {
+          night_mode_enabled: els.displayNightModeEnabled.value === "true",
+          night_start: els.displayNightStart.value,
+          night_end: els.displayNightEnd.value,
+          day_brightness: percentToBrightness(els.displayDayBrightness.value),
+          night_brightness: percentToBrightness(els.displayNightBrightness.value),
+          wake_brightness: percentToBrightness(els.displayWakeBrightness.value),
+          wake_duration_seconds: Number(els.displayWakeDurationSeconds.value),
+          xrandr_output: els.displayXrandrOutput.value
+        }
       };
     }
 
@@ -776,8 +790,22 @@ ADMIN_HTML = """<!doctype html>
     els.restoreFullBrightness.addEventListener("click", () => restoreFullBrightness().catch((error) => setDisplayMessage(error.message)));
     els.unlock.addEventListener("click", () => unlockAdmin().catch((error) => setLockMessage(error.message)));
     els.unlockPin.addEventListener("keydown", (event) => {
+      if (Date.now() < unlockPinReadyAt) {
+        event.preventDefault();
+        return;
+      }
       if (event.key === "Enter") {
         unlockAdmin().catch((error) => setLockMessage(error.message));
+      }
+    });
+    els.unlockPin.addEventListener("beforeinput", (event) => {
+      if (Date.now() < unlockPinReadyAt) {
+        event.preventDefault();
+      }
+    });
+    els.unlockPin.addEventListener("input", () => {
+      if (Date.now() < unlockPinReadyAt) {
+        els.unlockPin.value = "";
       }
     });
 
@@ -786,6 +814,7 @@ ADMIN_HTML = """<!doctype html>
     });
 
     initTouchKeyboard();
+    prepareUnlockPinInput();
     noteAdminActivity(true);
     refreshStatus().catch((error) => setMessage(error.message));
     window.setInterval(() => {
@@ -921,9 +950,12 @@ def load_config():
 
 
 def save_config(config):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as config_file:
+    config_dir = CONFIG_FILE.parent
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=config_dir, delete=False) as config_file:
         json.dump(config, config_file, indent=2)
         config_file.write("\n")
+        temp_name = config_file.name
+    os.replace(temp_name, CONFIG_FILE)
 
 
 def run_command(command, timeout=30, cwd=None, env=None):
@@ -1002,6 +1034,51 @@ def normalize_display_config(display_config):
     display["wake_duration_seconds"] = max(1, min(24 * 60 * 60, int_or_default(display.get("wake_duration_seconds"), DISPLAY_DEFAULTS["wake_duration_seconds"])))
     display["xrandr_output"] = str(display.get("xrandr_output") or DISPLAY_DEFAULTS["xrandr_output"]).strip() or DISPLAY_DEFAULTS["xrandr_output"]
     return display
+
+
+def validate_display_payload(payload):
+    if not isinstance(payload, dict):
+        raise ValueError("JSON body must be an object.")
+
+    display_payload = payload.get("display")
+    if not isinstance(display_payload, dict):
+        raise ValueError("JSON body must include a display object.")
+
+    for required_field in [
+        "night_mode_enabled",
+        "night_start",
+        "night_end",
+        "day_brightness",
+        "night_brightness",
+        "wake_brightness",
+        "wake_duration_seconds",
+        "xrandr_output",
+    ]:
+        if required_field not in display_payload:
+            raise ValueError(f"Display field is required: {required_field}")
+
+    if normalize_time_string(display_payload.get("night_start"), None) is None:
+        raise ValueError("night_start must use HH:MM format.")
+    if normalize_time_string(display_payload.get("night_end"), None) is None:
+        raise ValueError("night_end must use HH:MM format.")
+
+    try:
+        float(display_payload.get("day_brightness"))
+        float(display_payload.get("night_brightness"))
+        float(display_payload.get("wake_brightness"))
+    except (TypeError, ValueError):
+        raise ValueError("Brightness values must be numbers.") from None
+
+    try:
+        int(display_payload.get("wake_duration_seconds"))
+    except (TypeError, ValueError):
+        raise ValueError("wake_duration_seconds must be an integer.") from None
+
+    output_name = str(display_payload.get("xrandr_output") or "").strip()
+    if not output_name:
+        raise ValueError("xrandr_output is required.")
+
+    return display_payload
 
 
 def parse_time_to_minutes(value):
@@ -1197,19 +1274,10 @@ def start_activity_monitor(state):
     return thread
 
 
-def update_display_config(config, form):
-    display = normalize_display_config(
-        {
-            "night_mode_enabled": form.get("night_mode_enabled", "false").lower() == "true",
-            "night_start": form.get("night_start"),
-            "night_end": form.get("night_end"),
-            "day_brightness": form.get("day_brightness"),
-            "night_brightness": form.get("night_brightness"),
-            "wake_brightness": form.get("wake_brightness"),
-            "wake_duration_seconds": form.get("wake_duration_seconds"),
-            "xrandr_output": form.get("xrandr_output"),
-        }
-    )
+def update_display_config(config, payload):
+    existing_display = config.get("display", {})
+    submitted_display = validate_display_payload(payload)
+    display = normalize_display_config({**existing_display, **submitted_display})
     config["display"] = display
     return display
 
@@ -1719,38 +1787,48 @@ def make_admin_handler(config, state):
 
             if path == "/api/display-settings":
                 try:
-                    form = self.read_json()
+                    payload = self.read_json()
+
+                    if not valid_admin_pin(config, payload):
+                        self.send_json(
+                            {"error": "Invalid admin PIN."},
+                            status=HTTPStatus.FORBIDDEN,
+                        )
+                        return
+
+                    with state["lock"]:
+                        display_config = update_display_config(state["config"], payload)
+                        state["display_override_brightness"] = None
+                        state["display_override_mode"] = None
+                        state["display_wake_until"] = 0.0
+                        save_config(state["config"])
+
+                    sync_display_brightness(state, force=True)
+                    display_status = get_display_status(state)
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "display": display_config,
+                            "warning": display_status.get("warning"),
+                        }
+                    )
                 except (json.JSONDecodeError, ValueError) as error:
                     self.send_json(
-                        {"error": f"Invalid JSON body: {error}"},
+                        {"error": str(error)},
                         status=HTTPStatus.BAD_REQUEST,
                     )
-                    return
-
-                if not valid_admin_pin(config, form):
+                except OSError:
+                    logging.exception("Failed to save display settings.")
                     self.send_json(
-                        {"error": "Invalid admin PIN."},
-                        status=HTTPStatus.UNAUTHORIZED,
+                        {"error": "Unable to save display settings right now."},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
                     )
-                    return
-
-                with state["lock"]:
-                    display_config = update_display_config(state["config"], form)
-                    state["display_override_brightness"] = None
-                    state["display_override_mode"] = None
-                    state["display_wake_until"] = 0.0
-                    save_config(state["config"])
-
-                sync_display_brightness(state, force=True)
-                display_status = get_display_status(state)
-                self.send_json(
-                    {
-                        "display": display_config,
-                        "warning": display_status.get("warning"),
-                        "message": "Display settings saved and applied.",
-                        "status": display_status,
-                    }
-                )
+                except Exception:
+                    logging.exception("Unexpected error while saving display settings.")
+                    self.send_json(
+                        {"error": "Unable to apply display settings right now."},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
                 return
 
             if path == "/api/display-preview-night":
