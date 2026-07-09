@@ -42,6 +42,10 @@ target_path.write_text(
 )
 PY
 
+if id compass >/dev/null 2>&1; then
+    sudo chown -R compass:compass /opt/stay-compass/device
+fi
+
 sudo mkdir -p /opt/stay-compass/browser-extension/admin-hotspot
 sudo cp "$PROJECT_DIR/browser-extension/admin-hotspot/background.js" /opt/stay-compass/browser-extension/admin-hotspot/background.js
 sudo cp "$PROJECT_DIR/browser-extension/admin-hotspot/content.js" /opt/stay-compass/browser-extension/admin-hotspot/content.js

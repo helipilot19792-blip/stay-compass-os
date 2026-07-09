@@ -208,6 +208,21 @@ ADMIN_HTML = """<!doctype html>
       gap: 14px;
       align-items: end;
     }
+    .pin-input-row {
+      display: flex;
+      gap: 10px;
+      align-items: stretch;
+    }
+    .pin-input-row input {
+      flex: 1 1 auto;
+      min-width: 0;
+    }
+    .pin-toggle {
+      flex: 0 0 auto;
+      min-width: 84px;
+      padding-inline: 16px;
+      touch-action: manipulation;
+    }
     .hidden { display: none; }
     dl {
       display: grid;
@@ -244,7 +259,10 @@ ADMIN_HTML = """<!doctype html>
       <div class="locked">
         <label>
           Admin PIN
-          <input id="unlockPin" type="password" inputmode="numeric" autocomplete="off">
+          <div class="pin-input-row">
+            <input id="unlockPin" type="password" inputmode="numeric" autocomplete="off">
+            <button id="toggleUnlockPin" class="secondary pin-toggle" type="button" aria-pressed="false">Show</button>
+          </div>
         </label>
         <button id="unlock" type="button">Unlock</button>
       </div>
@@ -358,6 +376,7 @@ ADMIN_HTML = """<!doctype html>
       scan: document.querySelector("#scan"),
       ssid: document.querySelector("#ssid"),
       touchKeyboard: document.querySelector("#touchKeyboard"),
+      toggleUnlockPin: document.querySelector("#toggleUnlockPin"),
       unlock: document.querySelector("#unlock"),
       unlockPin: document.querySelector("#unlockPin"),
       wifiSection: document.querySelector("#wifiSection"),
@@ -374,6 +393,7 @@ ADMIN_HTML = """<!doctype html>
     let adminPin = "";
     let lastAdminActivityPingAt = 0;
     let unlockPinReadyAt = 0;
+    let unlockPinVisible = false;
 
     function setMessage(text) {
       els.message.textContent = text;
@@ -392,8 +412,17 @@ ADMIN_HTML = """<!doctype html>
       els.displayWarning.style.color = text ? "#8a2d16" : "#155c5f";
     }
 
+    function syncUnlockPinToggle() {
+      els.unlockPin.type = unlockPinVisible ? "text" : "password";
+      els.toggleUnlockPin.textContent = unlockPinVisible ? "Hide" : "Show";
+      els.toggleUnlockPin.setAttribute("aria-pressed", unlockPinVisible ? "true" : "false");
+      els.toggleUnlockPin.setAttribute("aria-label", unlockPinVisible ? "Hide PIN" : "Show PIN");
+    }
+
     function prepareUnlockPinInput() {
       unlockPinReadyAt = Date.now() + ADMIN_PIN_GUARD_MS;
+      unlockPinVisible = false;
+      syncUnlockPinToggle();
       els.unlockPin.value = "";
       window.setTimeout(() => {
         els.unlockPin.value = "";
@@ -789,6 +818,13 @@ ADMIN_HTML = """<!doctype html>
     els.previewNightMode.addEventListener("click", () => previewNightMode().catch((error) => setDisplayMessage(error.message)));
     els.restoreFullBrightness.addEventListener("click", () => restoreFullBrightness().catch((error) => setDisplayMessage(error.message)));
     els.unlock.addEventListener("click", () => unlockAdmin().catch((error) => setLockMessage(error.message)));
+    els.toggleUnlockPin.addEventListener("click", () => {
+      unlockPinVisible = !unlockPinVisible;
+      syncUnlockPinToggle();
+      if (Date.now() >= unlockPinReadyAt) {
+        els.unlockPin.focus();
+      }
+    });
     els.unlockPin.addEventListener("keydown", (event) => {
       if (Date.now() < unlockPinReadyAt) {
         event.preventDefault();
@@ -1341,13 +1377,14 @@ def clear_admin_session(state):
 def request_app_mode(state, source):
     with state["lock"]:
         state["requested_mode"] = "app"
+        state["local_admin_navigation_pending"] = False
         state["admin_deadline"] = 0.0
         state["display_override_brightness"] = None
         state["display_override_mode"] = None
     log(f"App mode requested from {source}.")
 
 
-def request_admin_mode(state, source):
+def request_admin_mode(state, source, prefer_local_navigation=False):
     now = monotonic_seconds()
 
     with state["lock"]:
@@ -1359,6 +1396,7 @@ def request_admin_mode(state, source):
             return False
 
         state["requested_mode"] = "admin"
+        state["local_admin_navigation_pending"] = bool(prefer_local_navigation)
         state["admin_deadline"] = now + ADMIN_INACTIVITY_TIMEOUT_SECONDS
 
     log(f"Admin mode requested from {source}.")
@@ -1646,7 +1684,7 @@ def make_admin_handler(config, state):
                 return
 
             if path == "/api/open-admin":
-                if request_admin_mode(state, "extension hotspot"):
+                if request_admin_mode(state, "extension hotspot", prefer_local_navigation=True):
                     self.send_json({"message": "Opening admin mode..."})
                 else:
                     self.send_json(
@@ -1911,6 +1949,7 @@ def main():
         "chromium_process": None,
         "lock": threading.Lock(),
         "requested_mode": None,
+        "local_admin_navigation_pending": False,
         "shutdown": False,
         "admin_deadline": 0.0,
         "admin_failed_attempts": 0,
@@ -1955,6 +1994,7 @@ def main():
 
             with state["lock"]:
                 requested_mode = state.get("requested_mode")
+                local_admin_navigation_pending = state.get("local_admin_navigation_pending", False)
                 admin_deadline = state.get("admin_deadline", 0.0)
 
             if not online:
@@ -1986,21 +2026,35 @@ def main():
                 target_mode = requested_mode
                 with state["lock"]:
                     state["requested_mode"] = None
+                    state["local_admin_navigation_pending"] = False
             elif current_mode == "admin":
                 target_mode = "admin"
 
             target_url = pwa_url if target_mode == "app" else admin_url
 
             if current_mode != target_mode:
-                if target_mode == "admin":
+                if (
+                    target_mode == "admin"
+                    and requested_mode == "admin"
+                    and local_admin_navigation_pending
+                    and current_mode == "app"
+                    and chromium_process is not None
+                    and chromium_process.poll() is None
+                ):
+                    log("Opening admin mode without relaunch; Chromium is already navigating locally.")
+                    current_mode = target_mode
+                elif target_mode == "admin":
                     log("Opening admin mode.")
+                    terminate_process(chromium_process)
+                    chromium_process = launch_chromium(target_url)
+                    state["chromium_process"] = chromium_process
+                    current_mode = target_mode
                 else:
                     log("Opening Stay Compass app.")
-
-                terminate_process(chromium_process)
-                chromium_process = launch_chromium(target_url)
-                state["chromium_process"] = chromium_process
-                current_mode = target_mode
+                    terminate_process(chromium_process)
+                    chromium_process = launch_chromium(target_url)
+                    state["chromium_process"] = chromium_process
+                    current_mode = target_mode
 
                 if current_mode != "admin":
                     clear_admin_session(state)
