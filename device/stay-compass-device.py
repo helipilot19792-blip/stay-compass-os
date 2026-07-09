@@ -1042,9 +1042,6 @@ def apply_xrandr_brightness(state, brightness, reason):
     brightness = clamp_brightness(brightness)
     output_name = display_config.get("xrandr_output", DISPLAY_DEFAULTS["xrandr_output"])
     command = [
-        SUDO_BIN,
-        "-u",
-        COMPASS_USER,
         XRANDR_BIN,
         "--output",
         output_name,
@@ -1132,9 +1129,6 @@ def start_activity_monitor(state):
             try:
                 process = subprocess.Popen(
                     [
-                        SUDO_BIN,
-                        "-u",
-                        COMPASS_USER,
                         XINPUT_BIN,
                         "test-xi2",
                         "--root",
