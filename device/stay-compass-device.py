@@ -34,89 +34,6 @@ CHROMIUM_BIN = "/usr/bin/chromium"
 NMCLI_BIN = "/usr/bin/nmcli"
 SUDO_BIN = "/usr/bin/sudo"
 
-APP_HTML = """<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Stay Compass</title>
-  <style>
-    html, body {
-      width: 100%%;
-      height: 100%%;
-      margin: 0;
-      overflow: hidden;
-      background: #ffffff;
-    }
-    body {
-      position: relative;
-      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    iframe {
-      width: 100%%;
-      height: 100%%;
-      border: 0;
-      display: block;
-      background: #ffffff;
-    }
-    .admin-trigger {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 56px;
-      height: 56px;
-      z-index: 10;
-      background: transparent;
-    }
-  </style>
-</head>
-<body>
-  <div id="adminTrigger" class="admin-trigger" aria-hidden="true"></div>
-  <iframe id="appFrame" title="Stay Compass" loading="eager"></iframe>
-  <script>
-    const gesture = {
-      count: 0,
-      firstTapAt: 0,
-      requiredTaps: 5,
-      windowMs: 5000
-    };
-
-    async function openAdmin() {
-      try {
-        await fetch("/api/open-admin", { method: "POST" });
-      } catch (error) {
-        // Navigation below still works offline because this shell and admin page are local.
-      }
-      window.location.replace("/admin");
-    }
-
-    function registerAdminTap() {
-      const now = Date.now();
-      if (!gesture.firstTapAt || now - gesture.firstTapAt > gesture.windowMs) {
-        gesture.firstTapAt = now;
-        gesture.count = 0;
-      }
-
-      gesture.count += 1;
-
-      if (gesture.count >= gesture.requiredTaps) {
-        gesture.count = 0;
-        gesture.firstTapAt = 0;
-        openAdmin();
-      }
-    }
-
-    document.querySelector("#adminTrigger").addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      registerAdminTap();
-    });
-
-    document.querySelector("#appFrame").src = %(pwa_url_json)s;
-  </script>
-</body>
-</html>
-"""
-
 ADMIN_HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -1012,10 +929,6 @@ def maybe_update_on_boot(config, state):
 
 
 def make_admin_handler(config, state):
-    app_html = APP_HTML % {
-        "pwa_url_json": json.dumps(config.get("pwa_url") or ""),
-    }
-
     class AdminHandler(BaseHTTPRequestHandler):
         server_version = "StayCompassAdmin/0.1"
 
@@ -1036,15 +949,6 @@ def make_admin_handler(config, state):
             return {key: values[0] for key, values in parse_qs(body).items()}
 
         def do_GET(self):
-            if self.path == "/app":
-                body = app_html.encode("utf-8")
-                self.send_response(HTTPStatus.OK)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-
             if self.path == "/" or self.path == "/admin":
                 body = ADMIN_HTML.encode("utf-8")
                 self.send_response(HTTPStatus.OK)
@@ -1170,11 +1074,6 @@ def make_admin_handler(config, state):
                 self.send_json({"message": "Opening Stay Compass..."})
                 return
 
-            if self.path == "/api/open-admin":
-                state["requested_mode"] = "admin"
-                self.send_json({"message": "Opening admin mode..."})
-                return
-
             self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     return AdminHandler
@@ -1194,7 +1093,6 @@ def main():
     config = load_config()
     pwa_url = config.get("pwa_url")
     admin_url = f"http://{ADMIN_HOST}:{ADMIN_PORT}/"
-    app_url = f"http://{ADMIN_HOST}:{ADMIN_PORT}/app"
     state = {
         "chromium_process": None,
         "requested_mode": None,
@@ -1225,7 +1123,6 @@ def main():
         while True:
             online = has_network()
             target_mode = "app"
-            forced_mode = None
 
             if not online:
                 if offline_since is None:
@@ -1246,14 +1143,13 @@ def main():
                     chromium_process = state.get("chromium_process")
                     current_mode = "update" if chromium_process else None
 
-            if state.get("requested_mode") in {"app", "admin"}:
-                forced_mode = state["requested_mode"]
-                target_mode = forced_mode
+            if state.get("requested_mode") == "app":
+                target_mode = "app"
                 state["requested_mode"] = None
 
-            target_url = app_url if target_mode == "app" else admin_url
+            target_url = pwa_url if target_mode == "app" else admin_url
 
-            if current_mode != target_mode or forced_mode == target_mode:
+            if current_mode != target_mode:
                 if target_mode == "admin":
                     log("Opening admin mode.")
                 else:
