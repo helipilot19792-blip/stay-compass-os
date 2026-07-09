@@ -35,13 +35,14 @@ if target_path.exists():
 
 merged_config = {**source_config, **installed_config}
 merged_config["update_repo_dir"] = repo_dir
-
+# Device service runs as compass, so the repo path must be readable.
 target_path.write_text(
     json.dumps(merged_config, indent=2, sort_keys=True) + "\n",
     encoding="utf-8",
 )
 PY
-
+sudo chmod o+x "$(dirname "$PROJECT_DIR")"
+sudo chmod -R o+rX "$PROJECT_DIR/.git"
 if id compass >/dev/null 2>&1; then
     sudo usermod -aG netdev compass
 fi
