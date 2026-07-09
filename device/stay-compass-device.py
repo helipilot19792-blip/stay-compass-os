@@ -389,11 +389,29 @@ ADMIN_HTML = """<!doctype html>
     }
 
     async function api(path, options = {}) {
-      const response = await fetch(path, options);
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || "Request failed");
+      let response;
+      try {
+        response = await fetch(path, options);
+      } catch (error) {
+        throw new Error(`Failed to fetch ${path}: ${error.message}`);
       }
+
+      const responseText = await response.text();
+      let data = {};
+
+      if (responseText) {
+        try {
+          data = JSON.parse(responseText);
+        } catch (error) {
+          data = { raw: responseText };
+        }
+      }
+
+      if (!response.ok) {
+        const details = data.error || data.message || data.raw || response.statusText || "Request failed";
+        throw new Error(`${response.status} ${details}`);
+      }
+
       return data;
     }
 
@@ -661,8 +679,8 @@ ADMIN_HTML = """<!doctype html>
       els.displayXrandrOutput.value = settings.xrandr_output || "HDMI-1";
     }
 
-    function readDisplaySettingsForm() {
-      return new URLSearchParams({
+    function readDisplaySettingsPayload() {
+      return {
         pin: adminPin,
         night_mode_enabled: els.displayNightModeEnabled.value,
         night_start: els.displayNightStart.value,
@@ -672,7 +690,7 @@ ADMIN_HTML = """<!doctype html>
         wake_brightness: String(percentToBrightness(els.displayWakeBrightness.value)),
         wake_duration_seconds: els.displayWakeDurationSeconds.value,
         xrandr_output: els.displayXrandrOutput.value
-      });
+      };
     }
 
     async function loadDisplaySettings() {
@@ -684,7 +702,13 @@ ADMIN_HTML = """<!doctype html>
 
     async function saveDisplaySettings() {
       setDisplayMessage("Saving display settings...");
-      const data = await api("/api/display-settings", { method: "POST", body: readDisplaySettingsForm() });
+      const data = await api("/api/display-settings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(readDisplaySettingsPayload())
+      });
       fillDisplaySettings(data.display);
       setDisplayWarning(data.warning || "");
       setDisplayMessage(data.message || "Display settings saved.");
@@ -743,7 +767,10 @@ ADMIN_HTML = """<!doctype html>
     els.scan.addEventListener("click", scanNetworks);
     els.connect.addEventListener("click", connectWifi);
     els.openApp.addEventListener("click", openApp);
-    els.saveDisplaySettings.addEventListener("click", () => saveDisplaySettings().catch((error) => setDisplayMessage(error.message)));
+    els.saveDisplaySettings.addEventListener("click", (event) => {
+      event.preventDefault();
+      saveDisplaySettings().catch((error) => setDisplayMessage(error.message));
+    });
     els.previewNightMode.addEventListener("click", () => previewNightMode().catch((error) => setDisplayMessage(error.message)));
     els.restoreFullBrightness.addEventListener("click", () => restoreFullBrightness().catch((error) => setDisplayMessage(error.message)));
     els.unlock.addEventListener("click", () => unlockAdmin().catch((error) => setLockMessage(error.message)));
@@ -1466,6 +1493,16 @@ def make_admin_handler(config, state):
             body = self.rfile.read(content_length).decode("utf-8")
             return {key: values[0] for key, values in parse_qs(body).items()}
 
+        def read_json(self):
+            content_length = int(self.headers.get("Content-Length", "0"))
+            body = self.rfile.read(content_length).decode("utf-8")
+            if not body.strip():
+                return {}
+            payload = json.loads(body)
+            if not isinstance(payload, dict):
+                raise ValueError("JSON body must be an object.")
+            return payload
+
         def read_query(self, parsed_url):
             return {key: values[0] for key, values in parse_qs(parsed_url.query).items()}
 
@@ -1680,7 +1717,14 @@ def make_admin_handler(config, state):
                 return
 
             if path == "/api/display-settings":
-                form = self.read_form()
+                try:
+                    form = self.read_json()
+                except (json.JSONDecodeError, ValueError) as error:
+                    self.send_json(
+                        {"error": f"Invalid JSON body: {error}"},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                    return
 
                 if not valid_admin_pin(config, form):
                     self.send_json(
