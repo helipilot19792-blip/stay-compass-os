@@ -41,6 +41,42 @@ target_path.write_text(
     encoding="utf-8",
 )
 PY
+
+sudo mkdir -p /opt/stay-compass/browser-extension/admin-hotspot
+sudo cp "$PROJECT_DIR/browser-extension/admin-hotspot/background.js" /opt/stay-compass/browser-extension/admin-hotspot/background.js
+sudo cp "$PROJECT_DIR/browser-extension/admin-hotspot/content.js" /opt/stay-compass/browser-extension/admin-hotspot/content.js
+sudo python3 - "$PROJECT_DIR/browser-extension/admin-hotspot/manifest.template.json" "/opt/stay-compass/browser-extension/admin-hotspot/manifest.json" "/opt/stay-compass/device/config.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+from urllib.parse import urlparse
+
+template_path = Path(sys.argv[1])
+target_path = Path(sys.argv[2])
+config_path = Path(sys.argv[3])
+
+manifest = json.loads(template_path.read_text(encoding="utf-8"))
+config = json.loads(config_path.read_text(encoding="utf-8"))
+pwa_url = config.get("pwa_url", "").strip()
+parsed = urlparse(pwa_url)
+
+if not parsed.scheme or not parsed.netloc:
+    raise SystemExit(f"Invalid pwa_url for admin hotspot extension: {pwa_url!r}")
+
+pwa_match = f"{parsed.scheme}://{parsed.netloc}/*"
+
+manifest["host_permissions"] = [
+    pwa_match if entry == "__PWA_MATCH__" else entry
+    for entry in manifest["host_permissions"]
+]
+manifest["content_scripts"][0]["matches"] = [
+    pwa_match if entry == "__PWA_MATCH__" else entry
+    for entry in manifest["content_scripts"][0]["matches"]
+]
+
+target_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+PY
+
 sudo chmod o+x "$(dirname "$PROJECT_DIR")"
 sudo chmod -R o+rX "$PROJECT_DIR/.git"
 if id compass >/dev/null 2>&1; then

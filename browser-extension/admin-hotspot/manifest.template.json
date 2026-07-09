@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Stay Compass Admin Hotspot",
+  "version": "1.0.0",
+  "description": "Adds a hidden admin hotspot for the Stay Compass kiosk.",
+  "permissions": [
+    "tabs"
+  ],
+  "host_permissions": [
+    "__PWA_MATCH__",
+    "http://127.0.0.1:8750/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "__PWA_MATCH__"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
