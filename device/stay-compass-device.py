@@ -29,6 +29,8 @@ OFFLINE_ADMIN_DELAY_SECONDS = 20
 ADMIN_HOST = "127.0.0.1"
 ADMIN_PORT = 8750
 UPDATE_HELPER = "/opt/stay-compass/run-update.sh"
+ADMIN_OVERLAY_SIZE = 56
+ADMIN_OVERLAY_ALPHA = 0.01
 
 CHROMIUM_BIN = "/usr/bin/chromium"
 NMCLI_BIN = "/usr/bin/nmcli"
@@ -756,6 +758,73 @@ def launch_chromium(url):
     )
 
 
+def start_admin_overlay(state):
+    if not os.environ.get("DISPLAY"):
+        log("Admin overlay skipped: DISPLAY is not set.")
+        return None
+
+    def run_overlay():
+        try:
+            import tkinter as tk
+        except Exception as error:
+            log(f"Admin overlay unavailable: {error}")
+            return
+
+        root = tk.Tk()
+        root.overrideredirect(True)
+        root.configure(bg="#ffffff")
+        root.attributes("-topmost", True)
+
+        try:
+            root.attributes("-alpha", ADMIN_OVERLAY_ALPHA)
+        except tk.TclError:
+            log("Admin overlay transparency not supported; using fallback alpha.")
+
+        screen_width = root.winfo_screenwidth()
+        geometry = f"{ADMIN_OVERLAY_SIZE}x{ADMIN_OVERLAY_SIZE}+{max(0, screen_width - ADMIN_OVERLAY_SIZE)}+0"
+        root.geometry(geometry)
+
+        hitbox = tk.Frame(root, width=ADMIN_OVERLAY_SIZE, height=ADMIN_OVERLAY_SIZE, bg="#ffffff", highlightthickness=0, bd=0)
+        hitbox.pack(fill="both", expand=True)
+        hitbox.pack_propagate(False)
+
+        visible = {"shown": False}
+
+        def open_admin(_event=None):
+            state["requested_mode"] = "admin"
+            state["overlay_visible"] = False
+            root.withdraw()
+            visible["shown"] = False
+
+        def sync_overlay():
+            if state.get("shutdown"):
+                root.destroy()
+                return
+
+            should_show = bool(state.get("overlay_visible"))
+
+            if should_show and not visible["shown"]:
+                root.deiconify()
+                root.lift()
+                root.attributes("-topmost", True)
+                visible["shown"] = True
+            elif not should_show and visible["shown"]:
+                root.withdraw()
+                visible["shown"] = False
+
+            root.after(250, sync_overlay)
+
+        hitbox.bind("<Button-1>", open_admin)
+        root.withdraw()
+        sync_overlay()
+        root.mainloop()
+
+    thread = threading.Thread(target=run_overlay, daemon=True)
+    thread.start()
+    log("Admin overlay started.")
+    return thread
+
+
 def parse_nmcli_escaped_fields(line):
     fields = []
     current = []
@@ -1095,7 +1164,9 @@ def main():
     admin_url = f"http://{ADMIN_HOST}:{ADMIN_PORT}/"
     state = {
         "chromium_process": None,
+        "overlay_visible": False,
         "requested_mode": None,
+        "shutdown": False,
         "update": {
             "phase": "Preparing",
             "progress": 0,
@@ -1113,6 +1184,7 @@ def main():
     log("Starting device service...")
 
     start_admin_server(config, state)
+    start_admin_overlay(state)
 
     chromium_process = None
     current_mode = None
@@ -1159,17 +1231,21 @@ def main():
                 chromium_process = launch_chromium(target_url)
                 state["chromium_process"] = chromium_process
                 current_mode = target_mode
+                state["overlay_visible"] = current_mode == "app"
 
             if chromium_process.poll() is not None:
                 log("Chromium exited. Restarting current mode...")
                 chromium_process = launch_chromium(target_url)
                 state["chromium_process"] = chromium_process
+                state["overlay_visible"] = current_mode == "app"
 
             time.sleep(5)
 
     except KeyboardInterrupt:
         log("Stay Compass Device Service stopped.")
 
+        state["shutdown"] = True
+        state["overlay_visible"] = False
         log("Stopping Chromium...")
         terminate_process(chromium_process)
 
