@@ -42,6 +42,7 @@ ADMIN_HTML = """<!doctype html>
   <title>Stay Compass Admin</title>
   <style>
     :root {
+      --keyboard-height: 0px;
       color-scheme: light;
       font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: #f4f6f8;
@@ -54,9 +55,11 @@ ADMIN_HTML = """<!doctype html>
       display: grid;
       place-items: center;
       padding: 28px;
+      overflow-x: hidden;
     }
     body.keyboard-open {
-      padding-bottom: 260px;
+      place-items: start center;
+      padding-bottom: calc(var(--keyboard-height) + 28px);
     }
     main {
       width: min(920px, 100%);
@@ -107,6 +110,9 @@ ADMIN_HTML = """<!doctype html>
       padding: 10px 12px;
       font: inherit;
       background: #ffffff;
+    }
+    input, textarea {
+      scroll-margin-bottom: calc(var(--keyboard-height) + 24px);
     }
     button {
       min-height: 44px;
@@ -191,7 +197,7 @@ ADMIN_HTML = """<!doctype html>
     dd { margin: 0; color: #53616f; word-break: break-word; }
     @media (max-width: 760px) {
       body { padding: 14px; place-items: stretch; }
-      body.keyboard-open { padding-bottom: 260px; }
+      body.keyboard-open { padding-bottom: calc(var(--keyboard-height) + 14px); }
       header, section { padding: 20px; }
       header { display: block; }
       .status { text-align: left; margin-top: 12px; }
@@ -275,6 +281,8 @@ ADMIN_HTML = """<!doctype html>
       unlockPin: document.querySelector("#unlockPin"),
       wifiSection: document.querySelector("#wifiSection")
     };
+    const TEXT_INPUT_SELECTOR = 'input[type="text"], input[type="password"], input[type="search"], input[type="email"], input[type="url"], input[type="tel"], input:not([type]), textarea';
+    const KEYBOARD_MARGIN = 16;
 
     let adminPin = "";
 
@@ -319,21 +327,53 @@ ADMIN_HTML = """<!doctype html>
       hideTouchKeyboard();
     }
 
+    function isKeyboardInput(element) {
+      return Boolean(element && element.matches && element.matches(TEXT_INPUT_SELECTOR));
+    }
+
+    function updateKeyboardHeight() {
+      const keyboardHeight = els.touchKeyboard.classList.contains("hidden")
+        ? 0
+        : Math.ceil(els.touchKeyboard.getBoundingClientRect().height);
+      document.documentElement.style.setProperty("--keyboard-height", `${keyboardHeight}px`);
+      return keyboardHeight;
+    }
+
     function hideTouchKeyboard() {
       els.touchKeyboard.classList.add("hidden");
       document.body.classList.remove("keyboard-open");
+      activeKeyboardInput = null;
+      updateKeyboardHeight();
     }
 
     function showTouchKeyboard(input) {
+      if (!isKeyboardInput(input)) return;
       activeKeyboardInput = input;
       els.touchKeyboard.classList.remove("hidden");
       document.body.classList.add("keyboard-open");
       renderTouchKeyboard();
+      updateKeyboardHeight();
+      window.requestAnimationFrame(() => ensureInputVisible(input));
     }
 
     let activeKeyboardInput = null;
     let keyboardShift = false;
     let keyboardCaps = false;
+
+    function ensureInputVisible(input) {
+      if (!isKeyboardInput(input) || els.touchKeyboard.classList.contains("hidden")) return;
+
+      const rect = input.getBoundingClientRect();
+      const keyboardTop = els.touchKeyboard.getBoundingClientRect().top;
+      const visibleBottom = keyboardTop - KEYBOARD_MARGIN;
+      const visibleTop = KEYBOARD_MARGIN;
+
+      if (rect.bottom > visibleBottom) {
+        window.scrollBy({ top: rect.bottom - visibleBottom, behavior: "smooth" });
+      } else if (rect.top < visibleTop) {
+        window.scrollBy({ top: rect.top - visibleTop, behavior: "smooth" });
+      }
+    }
 
     function keyboardLetter(value) {
       return keyboardShift || keyboardCaps ? value.toUpperCase() : value;
@@ -392,21 +432,52 @@ ADMIN_HTML = """<!doctype html>
 
     // Touch keyboard is initialized here so the local admin/setup page works offline on kiosk touchscreens.
     function initTouchKeyboard() {
-      const textInputs = document.querySelectorAll('input[type="text"], input[type="password"], input:not([type])');
-      for (const input of textInputs) {
-        input.addEventListener("focus", () => showTouchKeyboard(input));
-      }
-
       els.touchKeyboard.addEventListener("pointerdown", (event) => {
         event.preventDefault();
       });
 
-      document.addEventListener("pointerdown", (event) => {
+      document.addEventListener("focusin", (event) => {
         const target = event.target;
-        if (els.touchKeyboard.contains(target) || target.matches('input[type="text"], input[type="password"], input:not([type])')) {
+        if (isKeyboardInput(target)) {
+          showTouchKeyboard(target);
+        }
+      });
+
+      document.addEventListener("focusout", (event) => {
+        if (!isKeyboardInput(event.target)) {
           return;
         }
-        hideTouchKeyboard();
+        window.setTimeout(() => {
+          const nextTarget = document.activeElement;
+          if (isKeyboardInput(nextTarget)) {
+            showTouchKeyboard(nextTarget);
+            return;
+          }
+          hideTouchKeyboard();
+        }, 0);
+      });
+
+      document.addEventListener("pointerdown", (event) => {
+        const target = event.target;
+        if (els.touchKeyboard.contains(target)) {
+          return;
+        }
+
+        if (isKeyboardInput(target)) {
+          window.setTimeout(() => showTouchKeyboard(target), 0);
+          return;
+        }
+
+        if (isKeyboardInput(document.activeElement)) {
+          document.activeElement.blur();
+        } else {
+          hideTouchKeyboard();
+        }
+      });
+
+      window.addEventListener("resize", () => {
+        updateKeyboardHeight();
+        ensureInputVisible(activeKeyboardInput);
       });
     }
 
@@ -433,7 +504,7 @@ ADMIN_HTML = """<!doctype html>
         { label: "&", onClick: () => inputText("&") },
         { label: "*", onClick: () => inputText("*") },
         { label: "?", onClick: () => inputText("?") },
-        { label: "Done", className: "wide", onClick: () => { hideTouchKeyboard(); if (activeKeyboardInput) activeKeyboardInput.blur(); } }
+        { label: "Done", className: "wide", onClick: () => { if (activeKeyboardInput) activeKeyboardInput.blur(); else hideTouchKeyboard(); } }
       ]);
       addKeyboardRow(inner, [
         { label: "-", onClick: () => inputText("-") },
@@ -449,6 +520,7 @@ ADMIN_HTML = """<!doctype html>
       ]);
 
       els.touchKeyboard.appendChild(inner);
+      updateKeyboardHeight();
     }
 
     async function unlockAdmin() {
