@@ -55,6 +55,7 @@ sudo chmod 440 /etc/sudoers.d/stay-compass-update
 sudo cp "$PROJECT_DIR/services/stay-compass-kiosk.service" /etc/systemd/system/stay-compass-kiosk.service
 
 sudo systemctl daemon-reload
+sudo systemctl unmask stay-compass-kiosk.service >/dev/null 2>&1 || true
 sudo systemctl enable stay-compass-kiosk.service
 
 echo "Kiosk service installed."
