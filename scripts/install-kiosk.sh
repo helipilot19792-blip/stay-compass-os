@@ -3,11 +3,14 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+BACKUP_DIR="/opt/stay-compass/backups"
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
 echo "Installing Stay Compass kiosk service..."
 
 sudo mkdir -p /opt/stay-compass
 sudo mkdir -p /opt/stay-compass/device
+sudo mkdir -p "$BACKUP_DIR"
 
 sudo cp "$PROJECT_DIR/launcher/start-kiosk.sh" /opt/stay-compass/start-kiosk.sh
 sudo chmod +x /opt/stay-compass/start-kiosk.sh
@@ -94,8 +97,71 @@ sudo chmod 440 /etc/sudoers.d/stay-compass-update
 
 sudo cp "$PROJECT_DIR/services/stay-compass-kiosk.service" /etc/systemd/system/stay-compass-kiosk.service
 
+AUTLOGIN_DIR="/etc/systemd/system/getty@tty1.service.d"
+AUTLOGIN_CONF="$AUTLOGIN_DIR/stay-compass-autologin.conf"
+sudo mkdir -p "$AUTLOGIN_DIR"
+if [ -f "$AUTLOGIN_CONF" ]; then
+    sudo cp "$AUTLOGIN_CONF" "$BACKUP_DIR/getty-tty1-autologin.$TIMESTAMP.bak"
+fi
+sudo tee "$AUTLOGIN_CONF" >/dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin compass --noclear %I $TERM
+EOF
+
+COMPASS_HOME="$(getent passwd compass | cut -d: -f6)"
+if [ -z "$COMPASS_HOME" ]; then
+    echo "ERROR: Unable to determine compass home directory."
+    exit 1
+fi
+
+COMPASS_BASH_PROFILE="$COMPASS_HOME/.bash_profile"
+if sudo test -f "$COMPASS_BASH_PROFILE"; then
+    sudo cp "$COMPASS_BASH_PROFILE" "$BACKUP_DIR/compass.bash_profile.$TIMESTAMP.bak"
+fi
+
+sudo python3 - "$COMPASS_BASH_PROFILE" <<'PY'
+import sys
+from pathlib import Path
+
+profile_path = Path(sys.argv[1])
+start_marker = "# >>> stay-compass kiosk >>>"
+end_marker = "# <<< stay-compass kiosk <<<"
+managed_block = """# >>> stay-compass kiosk >>>
+if [ -z "${DISPLAY:-}" ] && [ "$(tty)" = "/dev/tty1" ]; then
+    exec startx /opt/stay-compass/start-kiosk.sh -- :0 -nocursor
+fi
+# <<< stay-compass kiosk <<<"""
+
+existing = ""
+if profile_path.exists():
+    existing = profile_path.read_text(encoding="utf-8")
+
+if start_marker in existing and end_marker in existing:
+    before, remainder = existing.split(start_marker, 1)
+    _, after = remainder.split(end_marker, 1)
+    updated = before.rstrip()
+    if updated:
+        updated += "\n\n"
+    updated += managed_block
+    after = after.lstrip("\n")
+    if after:
+        updated += "\n\n" + after.rstrip()
+else:
+    updated = existing.rstrip()
+    if updated:
+        updated += "\n\n"
+    updated += managed_block
+
+updated = updated.rstrip() + "\n"
+profile_path.write_text(updated, encoding="utf-8")
+PY
+sudo chown compass:compass "$COMPASS_BASH_PROFILE"
+sudo chmod 644 "$COMPASS_BASH_PROFILE"
+
 sudo systemctl daemon-reload
-sudo systemctl unmask stay-compass-kiosk.service >/dev/null 2>&1 || true
-sudo systemctl enable stay-compass-kiosk.service
+sudo systemctl unmask getty@tty1.service >/dev/null 2>&1 || true
+sudo systemctl enable getty@tty1.service
+sudo systemctl disable stay-compass-kiosk.service >/dev/null 2>&1 || true
 
 echo "Kiosk service installed."
