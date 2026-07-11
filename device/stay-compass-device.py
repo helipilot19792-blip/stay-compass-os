@@ -2905,16 +2905,94 @@ def scan_wifi_networks():
     return networks
 
 
-def connect_wifi(ssid, password):
-    command = [NMCLI_BIN, "dev", "wifi", "connect", ssid]
+def list_wifi_connection_ids(ssid):
+    try:
+        result = run_command(
+            [
+                NMCLI_BIN,
+                "-t",
+                "--escape",
+                "yes",
+                "-f",
+                "NAME,TYPE,802-11-wireless.ssid",
+                "connection",
+                "show",
+            ],
+            timeout=30,
+        )
+    except OSError:
+        return []
 
+    if result.returncode != 0:
+        return []
+
+    connection_ids = []
+    for line in result.stdout.splitlines():
+        name, connection_type, connection_ssid = (parse_nmcli_escaped_fields(line) + ["", "", ""])[:3]
+        if connection_type.strip() != "802-11-wireless":
+            continue
+        if connection_ssid.strip() != ssid:
+            continue
+        if name.strip():
+            connection_ids.append(name.strip())
+    return connection_ids
+
+
+def redact_nmcli_output(text):
+    if not text:
+        return ""
+    sanitized = str(text).replace("\r", " ").replace("\n", " ").strip()
+    return " ".join(sanitized.split())
+
+
+def format_nmcli_error(operation, result):
+    details = redact_nmcli_output(get_command_output(result))
+    if not details:
+        details = "nmcli did not provide additional details."
+    return f"{operation} failed (exit {result.returncode}): {details}"
+
+
+def connect_wifi(ssid, password):
+    matching_connection_ids = list_wifi_connection_ids(ssid)
+    if matching_connection_ids:
+        log(
+            f"Wi-Fi connect: removing {len(matching_connection_ids)} existing "
+            f"NetworkManager profile(s) for SSID {ssid!r} before reconnect."
+        )
+    for connection_id in matching_connection_ids:
+        delete_result = run_command(
+            [NMCLI_BIN, "connection", "delete", connection_id],
+            timeout=30,
+        )
+        if delete_result.returncode != 0:
+            log(
+                f"Wi-Fi connect: failed to delete existing profile {connection_id!r} "
+                f"for SSID {ssid!r} (exit {delete_result.returncode})."
+            )
+
+    command = [NMCLI_BIN, "device", "wifi", "connect", ssid]
     if password:
         command.extend(["password", password])
 
+    log(
+        f"Wi-Fi connect: invoking nmcli device wifi connect for SSID {ssid!r} "
+        f"(password supplied: {'yes' if bool(password) else 'no'})."
+    )
     result = run_command(command, timeout=60)
 
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "Unable to connect Wi-Fi.")
+        error_message = format_nmcli_error(f"Connecting to Wi-Fi SSID {ssid!r}", result)
+        log(f"Wi-Fi connect warning: {error_message}")
+
+        if "Secrets were required, but not provided" in (result.stderr or result.stdout):
+            raise RuntimeError(
+                f"Unable to connect to {ssid!r}. NetworkManager still reports missing "
+                "Wi-Fi credentials. Re-enter the password and try again."
+            )
+
+        raise RuntimeError(f"Unable to connect to {ssid!r}. {error_message}")
+
+    log(f"Wi-Fi connect: nmcli reported success for SSID {ssid!r}.")
 
 
 def valid_admin_pin(config, form):
