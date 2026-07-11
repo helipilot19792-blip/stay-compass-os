@@ -1119,6 +1119,20 @@ ADMIN_HTML = """<!doctype html>
     .pin-toggle {
       min-width: 92px;
     }
+    .checkbox-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+      font-weight: 800;
+      color: #2c4047;
+    }
+    .checkbox-row input {
+      width: auto;
+      min-height: 18px;
+      margin: 0;
+      padding: 0;
+    }
     .message {
       min-height: 22px;
       font-weight: 800;
@@ -1474,10 +1488,16 @@ ADMIN_HTML = """<!doctype html>
                 <button id="scan" class="secondary" type="button">Scan Networks</button>
                 <div class="helper">This keeps the existing local Wi-Fi workflow intact.</div>
               </div>
-              <label>
-                Wi-Fi password
-                <input id="password" type="password" autocomplete="current-password">
-              </label>
+              <div class="stack">
+                <label>
+                  Wi-Fi password
+                  <input id="password" type="password" autocomplete="current-password">
+                </label>
+                <label class="checkbox-row">
+                  <input id="toggleWifiPassword" type="checkbox">
+                  <span>Show password</span>
+                </label>
+              </div>
             </div>
             <div class="inline-actions">
               <button id="connect" type="button">Connect Wi-Fi</button>
@@ -1658,6 +1678,7 @@ ADMIN_HTML = """<!doctype html>
       settingsPwaUrl: document.querySelector("#settingsPwaUrl"),
       ssid: document.querySelector("#ssid"),
       touchKeyboard: document.querySelector("#touchKeyboard"),
+      toggleWifiPassword: document.querySelector("#toggleWifiPassword"),
       toggleUnlockPin: document.querySelector("#toggleUnlockPin"),
       unlock: document.querySelector("#unlock"),
       unlockPin: document.querySelector("#unlockPin"),
@@ -1695,6 +1716,9 @@ ADMIN_HTML = """<!doctype html>
       els.toggleUnlockPin.textContent = unlockPinVisible ? "Hide" : "Show";
       els.toggleUnlockPin.setAttribute("aria-pressed", unlockPinVisible ? "true" : "false");
       els.toggleUnlockPin.setAttribute("aria-label", unlockPinVisible ? "Hide PIN" : "Show PIN");
+    }
+    function syncWifiPasswordToggle() {
+      els.password.type = els.toggleWifiPassword.checked ? "text" : "password";
     }
     function prepareUnlockPinInput() {
       unlockPinReadyAt = Date.now() + ADMIN_PIN_GUARD_MS;
@@ -2221,6 +2245,7 @@ ADMIN_HTML = """<!doctype html>
       syncUnlockPinToggle();
       if (Date.now() >= unlockPinReadyAt) els.unlockPin.focus();
     });
+    els.toggleWifiPassword.addEventListener("change", syncWifiPasswordToggle);
     els.unlockPin.addEventListener("keydown", (event) => {
       if (Date.now() < unlockPinReadyAt) {
         event.preventDefault();
@@ -2238,6 +2263,7 @@ ADMIN_HTML = """<!doctype html>
       document.addEventListener(eventName, () => noteAdminActivity(), true);
     });
     initTouchKeyboard();
+    syncWifiPasswordToggle();
     prepareUnlockPinInput();
     api("/api/status")
       .then((status) => updateNetworkChip(Boolean(status.online)))
@@ -2930,7 +2956,9 @@ def scan_wifi_networks():
     )
 
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "Unable to scan Wi-Fi networks.")
+        error_message = format_nmcli_error("Scanning Wi-Fi networks", result)
+        log(f"Wi-Fi warning: {error_message}")
+        raise RuntimeError("Unable to scan Wi-Fi networks right now.")
 
     networks = []
     seen_ssids = set()
@@ -2987,6 +3015,66 @@ def list_wifi_connection_ids(ssid):
     return connection_ids
 
 
+def get_wifi_network_details(ssid):
+    try:
+        networks = scan_wifi_networks()
+    except Exception as error:
+        log(
+            f"Wi-Fi connect: scan lookup for SSID {ssid!r} failed before connect "
+            f"({error}). Falling back to existing NetworkManager data."
+        )
+        return {"ssid": ssid, "security": "", "signal": ""}
+
+    for network in networks:
+        if network.get("ssid") == ssid:
+            return network
+
+    return {"ssid": ssid, "security": "", "signal": ""}
+
+
+def normalize_wifi_security(security):
+    return " ".join(str(security or "").strip().upper().split())
+
+
+def wifi_security_is_open(security):
+    normalized = normalize_wifi_security(security)
+    return normalized in {"", "--", "NONE", "OPEN"}
+
+
+def wifi_security_is_personal(security):
+    normalized = normalize_wifi_security(security)
+    if not normalized or wifi_security_is_open(normalized):
+        return False
+    return "WPA" in normalized and "EAP" not in normalized and "802.1X" not in normalized
+
+
+def wifi_security_is_enterprise(security):
+    normalized = normalize_wifi_security(security)
+    return "EAP" in normalized or "802.1X" in normalized
+
+
+def format_command_for_log(command):
+    redacted = []
+    hide_next = False
+
+    for token in command:
+        if hide_next:
+            redacted.append("<redacted>")
+            hide_next = False
+            continue
+
+        redacted.append(token)
+        if token in {
+            "password",
+            "wifi-sec.psk",
+            "802-11-wireless-security.psk",
+            "psk",
+        }:
+            hide_next = True
+
+    return " ".join(redacted)
+
+
 def redact_nmcli_output(text):
     if not text:
         return ""
@@ -3001,50 +3089,19 @@ def format_nmcli_error(operation, result):
     return f"{operation} failed (exit {result.returncode}): {details}"
 
 
-def connect_wifi(ssid, password):
-    matching_connection_ids = list_wifi_connection_ids(ssid)
-    if matching_connection_ids:
-        log(
-            f"Wi-Fi connect: removing {len(matching_connection_ids)} existing "
-            f"NetworkManager profile(s) for SSID {ssid!r} before reconnect."
-        )
-    for connection_id in matching_connection_ids:
-        delete_result = run_command(
-            [NMCLI_BIN, "connection", "delete", connection_id],
-            timeout=30,
-        )
-        if delete_result.returncode != 0:
-            log(
-                f"Wi-Fi connect: failed to delete existing profile {connection_id!r} "
-                f"for SSID {ssid!r} (exit {delete_result.returncode})."
-            )
-
-    command = [NMCLI_BIN, "device", "wifi", "connect", ssid]
-    if password:
-        command.extend(["password", password])
-
-    log(
-        f"Wi-Fi connect: invoking nmcli device wifi connect for SSID {ssid!r} "
-        f"(password supplied: {'yes' if bool(password) else 'no'})."
-    )
-    result = run_command(command, timeout=60)
+def run_nmcli_or_raise(command, timeout, operation, user_message):
+    log(f"Wi-Fi: running {format_command_for_log(command)}")
+    result = run_command(command, timeout=timeout)
 
     if result.returncode != 0:
-        error_message = format_nmcli_error(f"Connecting to Wi-Fi SSID {ssid!r}", result)
-        log(f"Wi-Fi connect warning: {error_message}")
+        error_message = format_nmcli_error(operation, result)
+        log(f"Wi-Fi warning: {error_message}")
+        raise RuntimeError(user_message)
 
-        if "Secrets were required, but not provided" in (result.stderr or result.stdout):
-            raise RuntimeError(
-                f"Unable to connect to {ssid!r}. NetworkManager still reports missing "
-                "Wi-Fi credentials. Re-enter the password and try again."
-            )
-
-        raise RuntimeError(f"Unable to connect to {ssid!r}. {error_message}")
-
-    log(f"Wi-Fi connect: nmcli reported success for SSID {ssid!r}.")
+    return result
 
 
-def get_active_wifi_device():
+def get_wifi_device(prefer_active=False):
     try:
         result = run_command(
             [
@@ -3065,18 +3122,193 @@ def get_active_wifi_device():
     if result.returncode != 0:
         return None
 
+    fallback_device = None
+
     for line in result.stdout.splitlines():
         device, device_type, state_text = (parse_nmcli_escaped_fields(line) + ["", "", ""])[:3]
         if device_type.strip() != "wifi":
             continue
+
+        device = device.strip()
+        if not device:
+            continue
+
+        if fallback_device is None:
+            fallback_device = device
+
         normalized_state = state_text.strip().lower()
-        if normalized_state in {"connected", "connecting", "connected (externally)"} and device.strip():
-            return device.strip()
-    return None
+        if normalized_state in {"connected", "connecting", "connected (externally)"}:
+            return device
+
+    return None if prefer_active else fallback_device
+
+
+def verify_wifi_security_profile(connection_id, expect_personal_security):
+    fields = "802-11-wireless-security.key-mgmt,802-11-wireless-security.psk"
+    result = run_command(
+        [NMCLI_BIN, "--show-secrets", "-g", fields, "connection", "show", connection_id],
+        timeout=20,
+    )
+
+    if result.returncode != 0:
+        log(
+            f"Wi-Fi warning: unable to inspect NetworkManager profile {connection_id!r} "
+            f"after update ({format_nmcli_error('Inspecting Wi-Fi profile', result)})."
+        )
+        return
+
+    lines = result.stdout.splitlines()
+    key_mgmt = (lines[0] if len(lines) > 0 else "").strip()
+    psk = (lines[1] if len(lines) > 1 else "").strip()
+
+    if expect_personal_security:
+        if key_mgmt != "wpa-psk" or not psk:
+            log(
+                f"Wi-Fi warning: NetworkManager profile {connection_id!r} is missing "
+                f"required WPA Personal settings after creation (key-mgmt={key_mgmt!r}, "
+                f"psk present={'yes' if bool(psk) else 'no'})."
+            )
+            raise RuntimeError(
+                "Unable to save the Wi-Fi password correctly. Please try connecting again."
+            )
+        return
+
+    if key_mgmt:
+        log(
+            f"Wi-Fi warning: open-network profile {connection_id!r} unexpectedly still "
+            f"contains key management {key_mgmt!r}."
+        )
+
+
+def connect_wifi(ssid, password):
+    network = get_wifi_network_details(ssid)
+    security = network.get("security", "")
+    is_open_network = wifi_security_is_open(security)
+    is_personal_network = wifi_security_is_personal(security)
+
+    if wifi_security_is_enterprise(security):
+        raise RuntimeError(
+            "This Wi-Fi page supports open networks and WPA/WPA2 Personal networks only."
+        )
+
+    if not is_open_network and not is_personal_network and security:
+        raise RuntimeError(
+            f"Unable to identify the security mode for {ssid!r}. Re-scan networks and try again."
+        )
+
+    if is_personal_network and not password:
+        raise RuntimeError(f"Enter the Wi-Fi password for {ssid!r} and try again.")
+
+    device = get_wifi_device(prefer_active=False)
+    if not device:
+        raise RuntimeError("No Wi-Fi adapter is available right now.")
+
+    matching_connection_ids = list_wifi_connection_ids(ssid)
+    if matching_connection_ids:
+        log(
+            f"Wi-Fi connect: removing {len(matching_connection_ids)} existing "
+            f"NetworkManager profile(s) for SSID {ssid!r} before reconnect."
+        )
+    for connection_id in matching_connection_ids:
+        delete_result = run_command(
+            [NMCLI_BIN, "connection", "delete", connection_id],
+            timeout=30,
+        )
+        if delete_result.returncode != 0:
+            log(
+                f"Wi-Fi connect: failed to delete existing profile {connection_id!r} "
+                f"for SSID {ssid!r} (exit {delete_result.returncode})."
+            )
+
+    connection_id = ssid
+    add_command = [
+        NMCLI_BIN,
+        "connection",
+        "add",
+        "type",
+        "wifi",
+        "ifname",
+        device,
+        "con-name",
+        connection_id,
+        "ssid",
+        ssid,
+    ]
+    run_nmcli_or_raise(
+        add_command,
+        timeout=30,
+        operation=f"Creating Wi-Fi profile for SSID {ssid!r}",
+        user_message=f"Unable to prepare the Wi-Fi profile for {ssid!r}.",
+    )
+
+    common_settings = [
+        NMCLI_BIN,
+        "connection",
+        "modify",
+        connection_id,
+        "connection.autoconnect",
+        "yes",
+        "802-11-wireless.mode",
+        "infrastructure",
+        "ipv4.method",
+        "auto",
+        "ipv6.method",
+        "auto",
+    ]
+    run_nmcli_or_raise(
+        common_settings,
+        timeout=30,
+        operation=f"Updating Wi-Fi profile for SSID {ssid!r}",
+        user_message=f"Unable to save the Wi-Fi settings for {ssid!r}.",
+    )
+
+    if is_personal_network:
+        secure_settings = [
+            NMCLI_BIN,
+            "connection",
+            "modify",
+            connection_id,
+            "wifi-sec.key-mgmt",
+            "wpa-psk",
+            "wifi-sec.psk",
+            password,
+        ]
+        run_nmcli_or_raise(
+            secure_settings,
+            timeout=30,
+            operation=f"Applying WPA Personal settings to SSID {ssid!r}",
+            user_message=(
+                f"Unable to save the Wi-Fi password for {ssid!r}. Check the password and try again."
+            ),
+        )
+        verify_wifi_security_profile(connection_id, expect_personal_security=True)
+    else:
+        verify_wifi_security_profile(connection_id, expect_personal_security=False)
+
+    activate_command = [NMCLI_BIN, "connection", "up", connection_id]
+    try:
+        run_nmcli_or_raise(
+            activate_command,
+            timeout=60,
+            operation=f"Activating Wi-Fi profile for SSID {ssid!r}",
+            user_message=f"Unable to connect to {ssid!r}. Check the password and try again.",
+        )
+    except RuntimeError as error:
+        failure_message = str(error)
+        if is_open_network:
+            failure_message = (
+                f"Unable to connect to {ssid!r}. Check the signal and try again."
+            )
+        raise RuntimeError(failure_message)
+
+    log(
+        f"Wi-Fi connect: connection profile {connection_id!r} activated for SSID {ssid!r} "
+        f"using {'open' if is_open_network else 'WPA/WPA2 Personal'} security."
+    )
 
 
 def disconnect_wifi():
-    device = get_active_wifi_device()
+    device = get_wifi_device(prefer_active=True)
     if not device:
         raise RuntimeError("No active Wi-Fi connection is available to disconnect.")
 
@@ -3086,7 +3318,7 @@ def disconnect_wifi():
     if result.returncode != 0:
         error_message = format_nmcli_error(f"Disconnecting Wi-Fi device {device!r}", result)
         log(f"Wi-Fi disconnect warning: {error_message}")
-        raise RuntimeError(f"Unable to disconnect Wi-Fi right now. {error_message}")
+        raise RuntimeError("Unable to disconnect Wi-Fi right now.")
 
     log(f"Wi-Fi disconnect: nmcli reported success for interface {device!r}.")
     return {"device": device}
