@@ -29,6 +29,10 @@ NETWORK_CHECK_HOST = "1.1.1.1"
 NETWORK_CHECK_PORT = 53
 NETWORK_TIMEOUT_SECONDS = 3
 OFFLINE_ADMIN_DELAY_SECONDS = 20
+OFFLINE_RECOVERY_STABLE_SECONDS = 6
+OFFLINE_RECOVERY_SUCCESS_STREAK = 3
+OFFLINE_RECOVERY_IDLE_GRACE_SECONDS = 8
+OFFLINE_RECOVERY_POST_CONNECT_DELAY_SECONDS = 3
 ADMIN_HOST = "127.0.0.1"
 ADMIN_PORT = 8750
 UPDATE_HELPER = "/opt/stay-compass/run-update.sh"
@@ -1697,11 +1701,13 @@ ADMIN_HTML = """<!doctype html>
     const KEYBOARD_MARGIN = 16;
     const ADMIN_ACTIVITY_PING_MS = 5000;
     const ADMIN_PIN_GUARD_MS = 700;
+    const STATUS_POLL_MS = 2000;
     let adminPin = "";
     let latestOverview = null;
     let lastAdminActivityPingAt = 0;
     let unlockPinReadyAt = 0;
     let unlockPinVisible = false;
+    let autoReturnNavigating = false;
     let activeSection = "dashboard";
     let activeKeyboardInput = null;
     let keyboardShift = false;
@@ -1783,6 +1789,21 @@ ADMIN_HTML = """<!doctype html>
     function updateNetworkChip(online) {
       els.networkStatus.textContent = online ? "Internet online" : "Internet offline";
       els.networkStatus.style.background = online ? "rgba(255,255,255,0.2)" : "rgba(138,45,22,0.32)";
+    }
+    function maybeAutoReturnToPwa(status) {
+      if (autoReturnNavigating) return;
+      if (!status || !status.auto_return_pending || !status.pwa_url) return;
+      autoReturnNavigating = true;
+      setMessage(els.globalNotice, "Connection restored. Returning to Stay Compass...");
+      window.setTimeout(() => {
+        window.location.href = status.pwa_url;
+      }, 1200);
+    }
+    async function pollStatus() {
+      const status = await api("/api/status");
+      updateNetworkChip(Boolean(status.online));
+      maybeAutoReturnToPwa(status);
+      return status;
     }
     function formatDateTime(value) {
       if (!value) return "Unavailable";
@@ -2265,17 +2286,13 @@ ADMIN_HTML = """<!doctype html>
     initTouchKeyboard();
     syncWifiPasswordToggle();
     prepareUnlockPinInput();
-    api("/api/status")
-      .then((status) => updateNetworkChip(Boolean(status.online)))
-      .catch((error) => setMessage(els.globalNotice, error.message, true));
+    pollStatus().catch((error) => setMessage(els.globalNotice, error.message, true));
     window.setInterval(() => {
-      if (!adminPin) {
-        api("/api/status").then((status) => updateNetworkChip(Boolean(status.online))).catch(() => {});
-        return;
-      }
+      pollStatus().catch(() => {});
+      if (!adminPin || autoReturnNavigating) return;
       refreshOverview().catch(() => {});
       if (activeSection === "diagnostics") loadDiagnostics().catch(() => {});
-    }, 10000);
+    }, STATUS_POLL_MS);
   </script>
 </body>
 </html>
@@ -2859,6 +2876,15 @@ def clear_admin_session(state):
     with state["lock"]:
         state["admin_deadline"] = 0.0
         state["admin_unlocked"] = False
+        state["admin_last_activity_at"] = 0.0
+
+
+def reset_admin_entry_state(state):
+    with state["lock"]:
+        state["admin_entry_reason"] = None
+        state["auto_return_pending"] = False
+        state["wifi_connect_started_at"] = 0.0
+        state["wifi_connect_success_at"] = 0.0
 
 
 def request_app_mode(state, source):
@@ -2868,6 +2894,11 @@ def request_app_mode(state, source):
         state["local_app_navigation_pending"] = False
         state["admin_deadline"] = 0.0
         state["admin_unlocked"] = False
+        state["admin_last_activity_at"] = 0.0
+        state["admin_entry_reason"] = None
+        state["auto_return_pending"] = False
+        state["wifi_connect_started_at"] = 0.0
+        state["wifi_connect_success_at"] = 0.0
         state["display_override_brightness"] = None
         state["display_override_mode"] = None
     log(f"App mode requested from {source}.")
@@ -2880,12 +2911,17 @@ def request_app_mode_local_navigation(state, source):
         state["local_app_navigation_pending"] = True
         state["admin_deadline"] = 0.0
         state["admin_unlocked"] = False
+        state["admin_last_activity_at"] = 0.0
+        state["admin_entry_reason"] = None
+        state["auto_return_pending"] = False
+        state["wifi_connect_started_at"] = 0.0
+        state["wifi_connect_success_at"] = 0.0
         state["display_override_brightness"] = None
         state["display_override_mode"] = None
     log(f"App mode local navigation requested from {source}.")
 
 
-def request_admin_mode(state, source, prefer_local_navigation=False):
+def request_admin_mode(state, source, prefer_local_navigation=False, entry_reason="manual"):
     now = monotonic_seconds()
 
     with state["lock"]:
@@ -2901,13 +2937,38 @@ def request_admin_mode(state, source, prefer_local_navigation=False):
         state["local_app_navigation_pending"] = False
         state["admin_deadline"] = now + ADMIN_INACTIVITY_TIMEOUT_SECONDS
         state["admin_unlocked"] = False
+        state["admin_last_activity_at"] = 0.0
+        state["admin_entry_reason"] = entry_reason
+        state["auto_return_pending"] = False
+        state["wifi_connect_started_at"] = 0.0
+        state["wifi_connect_success_at"] = 0.0
 
-    log(f"Admin mode requested from {source}.")
+    log(f"Admin mode requested from {source} (entry reason: {entry_reason}).")
+    return True
+
+
+def queue_offline_recovery_return(state, source):
+    with state["lock"]:
+        if state.get("admin_entry_reason") != "offline_recovery":
+            return False
+        if state.get("auto_return_pending"):
+            return False
+
+        state["requested_mode"] = "app"
+        state["local_admin_navigation_pending"] = False
+        state["local_app_navigation_pending"] = True
+        state["admin_deadline"] = 0.0
+        state["admin_unlocked"] = False
+        state["auto_return_pending"] = True
+
+    log(f"Offline recovery: returning to configured PWA from {source}.")
     return True
 
 
 def record_admin_activity(state, source):
     deadline = set_admin_deadline(state, source)
+    with state["lock"]:
+        state["admin_last_activity_at"] = monotonic_seconds()
     log(f"Admin activity detected from {source}; timeout reset to {int(deadline - monotonic_seconds())}s.")
 
 
@@ -3522,6 +3583,7 @@ def collect_admin_overview(config, state):
         current_mode = state.get("current_mode")
         admin_unlocked = state.get("admin_unlocked", False)
         admin_deadline = state.get("admin_deadline", 0.0)
+        admin_entry_reason = state.get("admin_entry_reason")
         update_state = dict(state.get("update", {}))
         service_started_at = state.get("service_started_at", time.time())
 
@@ -3576,6 +3638,7 @@ def collect_admin_overview(config, state):
     can_manage_updates = bool(repo_dir and (Path(repo_dir) / ".git").exists())
     diagnostics = {
         "mode": current_mode_label,
+        "admin_entry_reason": admin_entry_reason,
         "admin_deadline_seconds": max(0, int(admin_deadline - monotonic_seconds())) if admin_deadline else 0,
         "service_uptime_seconds": service_uptime_seconds,
         "service_uptime_human": format_uptime(service_uptime_seconds),
@@ -3840,9 +3903,13 @@ def make_admin_handler(config, state):
                 return
 
             if path == "/api/status":
+                with state["lock"]:
+                    auto_return_pending = bool(state.get("auto_return_pending"))
                 self.send_json(
                     {
                         "online": has_network(),
+                        "auto_return_pending": auto_return_pending,
+                        "pwa_url": config.get("pwa_url"),
                     }
                 )
                 return
@@ -3897,7 +3964,12 @@ def make_admin_handler(config, state):
                 return
 
             if path == "/api/open-admin":
-                if request_admin_mode(state, "extension hotspot", prefer_local_navigation=True):
+                if request_admin_mode(
+                    state,
+                    "extension hotspot",
+                    prefer_local_navigation=True,
+                    entry_reason="manual",
+                ):
                     self.send_json({"message": "Opening admin mode..."})
                 else:
                     self.send_json(
@@ -3941,6 +4013,11 @@ def make_admin_handler(config, state):
                             state["local_app_navigation_pending"] = False
                             state["admin_deadline"] = 0.0
                             state["admin_unlocked"] = False
+                            state["admin_last_activity_at"] = 0.0
+                            state["admin_entry_reason"] = None
+                            state["auto_return_pending"] = False
+                            state["wifi_connect_started_at"] = 0.0
+                            state["wifi_connect_success_at"] = 0.0
                             log("Admin access locked for 5 minutes after 3 failed PIN attempts.")
                             self.send_json(
                                 {
@@ -4038,8 +4115,14 @@ def make_admin_handler(config, state):
                     )
                     return
 
+                with state["lock"]:
+                    state["wifi_connect_started_at"] = monotonic_seconds()
+                    state["wifi_connect_success_at"] = 0.0
+
                 try:
                     connect_wifi(ssid, form.get("password", ""))
+                    with state["lock"]:
+                        state["wifi_connect_success_at"] = monotonic_seconds()
                     self.send_json(
                         {
                             "message": (
@@ -4076,6 +4159,8 @@ def make_admin_handler(config, state):
                         }
                     )
                 except Exception as error:
+                    with state["lock"]:
+                        state["wifi_connect_started_at"] = 0.0
                     self.send_json(
                         {"error": str(error)},
                         status=HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -4300,8 +4385,13 @@ def main():
         "current_mode": None,
         "admin_unlocked": False,
         "admin_deadline": 0.0,
+        "admin_last_activity_at": 0.0,
         "admin_failed_attempts": 0,
         "admin_lockout_until": 0.0,
+        "admin_entry_reason": None,
+        "auto_return_pending": False,
+        "wifi_connect_started_at": 0.0,
+        "wifi_connect_success_at": 0.0,
         "service_started_at": time.time(),
         "activity_monitor_process": None,
         "display_last_applied": None,
@@ -4334,6 +4424,9 @@ def main():
     chromium_process = None
     current_mode = None
     offline_since = None
+    recovery_online_since = None
+    recovery_online_streak = 0
+    recovery_wait_reason = None
     update_checked = False
 
     try:
@@ -4346,19 +4439,99 @@ def main():
                 local_admin_navigation_pending = state.get("local_admin_navigation_pending", False)
                 local_app_navigation_pending = state.get("local_app_navigation_pending", False)
                 admin_deadline = state.get("admin_deadline", 0.0)
+                admin_unlocked = state.get("admin_unlocked", False)
+                admin_entry_reason = state.get("admin_entry_reason")
+                admin_last_activity_at = state.get("admin_last_activity_at", 0.0)
+                auto_return_pending = state.get("auto_return_pending", False)
+                wifi_connect_success_at = state.get("wifi_connect_success_at", 0.0)
 
             if not online:
+                if recovery_online_since is not None:
+                    log("Offline recovery: connectivity dropped again before return; resetting stability timer.")
+                recovery_online_since = None
+                recovery_online_streak = 0
+                recovery_wait_reason = None
+
                 if offline_since is None:
                     offline_since = time.monotonic()
 
                 if time.monotonic() - offline_since >= OFFLINE_ADMIN_DELAY_SECONDS:
                     target_mode = "admin"
+                    if current_mode != "admin" and requested_mode != "admin":
+                        log("Offline recovery screen opened after connectivity loss.")
+                        if request_admin_mode(
+                            state,
+                            "offline connectivity recovery",
+                            prefer_local_navigation=False,
+                            entry_reason="offline_recovery",
+                        ):
+                            with state["lock"]:
+                                requested_mode = state.get("requested_mode")
+                                local_admin_navigation_pending = state.get("local_admin_navigation_pending", False)
+                                local_app_navigation_pending = state.get("local_app_navigation_pending", False)
+                                admin_deadline = state.get("admin_deadline", 0.0)
+                                admin_unlocked = state.get("admin_unlocked", False)
+                                admin_entry_reason = state.get("admin_entry_reason")
+                                admin_last_activity_at = state.get("admin_last_activity_at", 0.0)
+                                auto_return_pending = state.get("auto_return_pending", False)
+                                wifi_connect_success_at = state.get("wifi_connect_success_at", 0.0)
                 elif current_mode is None:
                     log("Network offline. Waiting before admin mode...")
                     time.sleep(5)
                     continue
             else:
                 offline_since = None
+
+                if current_mode == "admin" and admin_entry_reason == "offline_recovery":
+                    now = monotonic_seconds()
+
+                    if recovery_online_since is None:
+                        recovery_online_since = now
+                        recovery_online_streak = 1
+                        recovery_wait_reason = "stability"
+                        log("Offline recovery: connectivity restored; waiting for stability before returning.")
+                    else:
+                        recovery_online_streak += 1
+
+                    stable_seconds = now - recovery_online_since
+                    success_age = now - wifi_connect_success_at if wifi_connect_success_at else None
+                    recent_activity_age = now - admin_last_activity_at if admin_last_activity_at else None
+
+                    if auto_return_pending:
+                        if recovery_wait_reason != "returning":
+                            recovery_wait_reason = "returning"
+                            log("Offline recovery: local return to the configured PWA is pending.")
+                    elif (
+                        recovery_online_streak < OFFLINE_RECOVERY_SUCCESS_STREAK
+                        or stable_seconds < OFFLINE_RECOVERY_STABLE_SECONDS
+                    ):
+                        if recovery_wait_reason != "stability":
+                            recovery_wait_reason = "stability"
+                            log("Offline recovery: waiting for connectivity to remain stable.")
+                    elif (
+                        wifi_connect_success_at
+                        and success_age is not None
+                        and success_age < OFFLINE_RECOVERY_POST_CONNECT_DELAY_SECONDS
+                    ):
+                        if recovery_wait_reason != "post_connect_delay":
+                            recovery_wait_reason = "post_connect_delay"
+                            log("Offline recovery: Wi-Fi reconnect succeeded; pausing briefly before return.")
+                    elif (
+                        not wifi_connect_success_at
+                        and admin_unlocked
+                        and admin_last_activity_at
+                        and recent_activity_age is not None
+                        and recent_activity_age < OFFLINE_RECOVERY_IDLE_GRACE_SECONDS
+                    ):
+                        if recovery_wait_reason != "admin_activity":
+                            recovery_wait_reason = "admin_activity"
+                            log("Offline recovery: installer activity detected; waiting before automatic return.")
+                    elif queue_offline_recovery_return(state, "stable connectivity restored"):
+                        recovery_wait_reason = "returning"
+                else:
+                    recovery_online_since = None
+                    recovery_online_streak = 0
+                    recovery_wait_reason = None
 
                 if not update_checked:
                     update_checked = True
@@ -4429,6 +4602,10 @@ def main():
 
                 if current_mode != "admin":
                     clear_admin_session(state)
+                    reset_admin_entry_state(state)
+                    recovery_online_since = None
+                    recovery_online_streak = 0
+                    recovery_wait_reason = None
 
             if chromium_process.poll() is not None:
                 log("Chromium exited. Restarting current mode...")
