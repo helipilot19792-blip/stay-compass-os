@@ -1270,6 +1270,7 @@ ADMIN_HTML = """<!doctype html>
       </div>
       <div class="hero-status">
         <div id="networkStatus" class="status-chip">Checking network...</div>
+        <button id="exitAdminMode" class="secondary" type="button">Return to Stay Compass</button>
         <div id="globalNotice" class="message"></div>
       </div>
     </div>
@@ -1461,6 +1462,10 @@ ADMIN_HTML = """<!doctype html>
           </div>
           <div class="card">
             <div class="field-grid">
+              <div class="stack">
+                <div><strong>Current Wi-Fi:</strong> <span id="activeWifiSsid">Unavailable</span></div>
+                <div class="helper">Disconnecting Wi-Fi may immediately terminate this SSH or admin session.</div>
+              </div>
               <label>
                 Network
                 <select id="ssid"></select>
@@ -1476,6 +1481,7 @@ ADMIN_HTML = """<!doctype html>
             </div>
             <div class="inline-actions">
               <button id="connect" type="button">Connect Wi-Fi</button>
+              <button id="disconnectWifi" class="secondary" type="button">Disconnect Wi-Fi</button>
             </div>
             <div id="wifiMessage" class="message"></div>
           </div>
@@ -1608,7 +1614,10 @@ ADMIN_HTML = """<!doctype html>
       displayWakeBrightness: document.querySelector("#displayWakeBrightness"),
       displayWakeDurationSeconds: document.querySelector("#displayWakeDurationSeconds"),
       displayXrandrOutput: document.querySelector("#displayXrandrOutput"),
+      disconnectWifi: document.querySelector("#disconnectWifi"),
+      exitAdminMode: document.querySelector("#exitAdminMode"),
       globalNotice: document.querySelector("#globalNotice"),
+      activeWifiSsid: document.querySelector("#activeWifiSsid"),
       healthChromium: document.querySelector("#healthChromium"),
       healthDeviceName: document.querySelector("#healthDeviceName"),
       healthDisk: document.querySelector("#healthDisk"),
@@ -1668,6 +1677,7 @@ ADMIN_HTML = """<!doctype html>
     const ADMIN_ACTIVITY_PING_MS = 5000;
     const ADMIN_PIN_GUARD_MS = 700;
     let adminPin = "";
+    let latestOverview = null;
     let lastAdminActivityPingAt = 0;
     let unlockPinReadyAt = 0;
     let unlockPinVisible = false;
@@ -1798,6 +1808,7 @@ ADMIN_HTML = """<!doctype html>
       }
     }
     function renderOverview(overview) {
+      latestOverview = overview;
       renderDashboardMetrics(overview);
       updateNetworkChip(Boolean(overview.health.internet_online));
       els.modePill.textContent = `Mode: ${overview.diagnostics.mode || "-"}`;
@@ -1811,6 +1822,8 @@ ADMIN_HTML = """<!doctype html>
       els.healthInternet.textContent = overview.health.internet_status || "-";
       els.healthIp.textContent = (overview.health.ip_addresses || []).join(", ") || "Unavailable";
       els.healthSsid.textContent = overview.health.wifi_ssid || "Unavailable";
+      els.activeWifiSsid.textContent = overview.health.wifi_ssid || "Not connected";
+      els.disconnectWifi.disabled = !overview.health.wifi_ssid;
       els.healthUptime.textContent = overview.health.uptime_human || "Unavailable";
       els.healthDisk.textContent = formatDiskUsage(overview.health.disk_usage);
       els.healthMemory.textContent = formatMemoryUsage(overview.health.memory_usage);
@@ -1925,7 +1938,15 @@ ADMIN_HTML = """<!doctype html>
       });
       const data = await api("/api/wifi", { method: "POST", body });
       setMessage(els.wifiMessage, data.message || "Wi-Fi settings saved.");
-      await refreshOverview();
+      await Promise.all([refreshOverview(), scanNetworks()]);
+    }
+    async function disconnectCurrentWifi() {
+      if (!window.confirm("Disconnect Wi-Fi now? This may immediately terminate the current SSH or admin session.")) return;
+      setMessage(els.wifiMessage, "Disconnecting Wi-Fi...");
+      const body = new URLSearchParams({ pin: adminPin });
+      const data = await api("/api/wifi-disconnect", { method: "POST", body });
+      setMessage(els.wifiMessage, data.message || "Wi-Fi disconnected.");
+      await Promise.all([refreshOverview(), scanNetworks()]);
     }
     async function saveSettings() {
       setMessage(els.settingsMessage, "Saving local Stay Compass settings...");
@@ -1963,6 +1984,18 @@ ADMIN_HTML = """<!doctype html>
       });
       setMessage(targetMessage, data.message || "Action requested.");
       await refreshOverview();
+    }
+    async function exitAdminMode() {
+      const fallbackUrl = els.settingsPwaUrl.value || "/";
+      const pwaUrl = (latestOverview && latestOverview.settings && latestOverview.settings.pwa_url) || fallbackUrl;
+      setMessage(els.globalNotice, "Returning to the Stay Compass kiosk...");
+      const data = await api("/api/admin-action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: adminPin, action: "return_to_kiosk" })
+      });
+      const targetUrl = data.pwa_url || pwaUrl || "/";
+      window.location.href = targetUrl;
     }
     async function loadDiagnostics() {
       const body = new URLSearchParams({ pin: adminPin });
@@ -2163,8 +2196,9 @@ ADMIN_HTML = """<!doctype html>
       button.addEventListener("click", () => selectSection(button.dataset.section));
     }
     els.refreshOverview.addEventListener("click", () => refreshOverview().catch((error) => setMessage(els.globalNotice, error.message, true)));
+    els.exitAdminMode.addEventListener("click", () => exitAdminMode().catch((error) => setMessage(els.globalNotice, error.message, true)));
     els.saveSettings.addEventListener("click", () => saveSettings().catch((error) => setMessage(els.settingsMessage, error.message, true)));
-    els.returnToKiosk.addEventListener("click", () => runAdminAction("return_to_kiosk", els.settingsMessage, "Return Chromium to the Stay Compass kiosk?").catch((error) => setMessage(els.settingsMessage, error.message, true)));
+    els.returnToKiosk.addEventListener("click", () => exitAdminMode().catch((error) => setMessage(els.settingsMessage, error.message, true)));
     els.restartChromiumFromSettings.addEventListener("click", () => runAdminAction("restart_chromium", els.settingsMessage, "Restart Chromium now?").catch((error) => setMessage(els.settingsMessage, error.message, true)));
     els.saveAdminPin.addEventListener("click", () => changePin().catch((error) => setMessage(els.pinMessage, error.message, true)));
     els.saveDisplaySettings.addEventListener("click", (event) => {
@@ -2175,6 +2209,7 @@ ADMIN_HTML = """<!doctype html>
     els.restoreFullBrightness.addEventListener("click", () => restoreFullBrightness().catch((error) => setMessage(els.displayMessage, error.message, true)));
     els.scan.addEventListener("click", () => scanNetworks().catch((error) => setMessage(els.wifiMessage, error.message, true)));
     els.connect.addEventListener("click", () => connectWifi().catch((error) => setMessage(els.wifiMessage, error.message, true)));
+    els.disconnectWifi.addEventListener("click", () => disconnectCurrentWifi().catch((error) => setMessage(els.wifiMessage, error.message, true)));
     els.checkUpdates.addEventListener("click", () => runAdminAction("check_updates", els.updatesMessage).catch((error) => setMessage(els.updatesMessage, error.message, true)));
     els.installUpdate.addEventListener("click", () => runAdminAction("install_update", els.updatesMessage, "Install the latest available update now?").catch((error) => setMessage(els.updatesMessage, error.message, true)));
     els.refreshDiagnostics.addEventListener("click", () => loadDiagnostics().catch((error) => setMessage(els.diagnosticsMessage, error.message, true)));
@@ -2804,11 +2839,24 @@ def request_app_mode(state, source):
     with state["lock"]:
         state["requested_mode"] = "app"
         state["local_admin_navigation_pending"] = False
+        state["local_app_navigation_pending"] = False
         state["admin_deadline"] = 0.0
         state["admin_unlocked"] = False
         state["display_override_brightness"] = None
         state["display_override_mode"] = None
     log(f"App mode requested from {source}.")
+
+
+def request_app_mode_local_navigation(state, source):
+    with state["lock"]:
+        state["requested_mode"] = "app"
+        state["local_admin_navigation_pending"] = False
+        state["local_app_navigation_pending"] = True
+        state["admin_deadline"] = 0.0
+        state["admin_unlocked"] = False
+        state["display_override_brightness"] = None
+        state["display_override_mode"] = None
+    log(f"App mode local navigation requested from {source}.")
 
 
 def request_admin_mode(state, source, prefer_local_navigation=False):
@@ -2824,6 +2872,7 @@ def request_admin_mode(state, source, prefer_local_navigation=False):
 
         state["requested_mode"] = "admin"
         state["local_admin_navigation_pending"] = bool(prefer_local_navigation)
+        state["local_app_navigation_pending"] = False
         state["admin_deadline"] = now + ADMIN_INACTIVITY_TIMEOUT_SECONDS
         state["admin_unlocked"] = False
 
@@ -2993,6 +3042,54 @@ def connect_wifi(ssid, password):
         raise RuntimeError(f"Unable to connect to {ssid!r}. {error_message}")
 
     log(f"Wi-Fi connect: nmcli reported success for SSID {ssid!r}.")
+
+
+def get_active_wifi_device():
+    try:
+        result = run_command(
+            [
+                NMCLI_BIN,
+                "-t",
+                "--escape",
+                "yes",
+                "-f",
+                "DEVICE,TYPE,STATE",
+                "device",
+                "status",
+            ],
+            timeout=20,
+        )
+    except OSError:
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    for line in result.stdout.splitlines():
+        device, device_type, state_text = (parse_nmcli_escaped_fields(line) + ["", "", ""])[:3]
+        if device_type.strip() != "wifi":
+            continue
+        normalized_state = state_text.strip().lower()
+        if normalized_state in {"connected", "connecting", "connected (externally)"} and device.strip():
+            return device.strip()
+    return None
+
+
+def disconnect_wifi():
+    device = get_active_wifi_device()
+    if not device:
+        raise RuntimeError("No active Wi-Fi connection is available to disconnect.")
+
+    log(f"Wi-Fi disconnect: invoking nmcli device disconnect for interface {device!r}.")
+    result = run_command([NMCLI_BIN, "device", "disconnect", device], timeout=45)
+
+    if result.returncode != 0:
+        error_message = format_nmcli_error(f"Disconnecting Wi-Fi device {device!r}", result)
+        log(f"Wi-Fi disconnect warning: {error_message}")
+        raise RuntimeError(f"Unable to disconnect Wi-Fi right now. {error_message}")
+
+    log(f"Wi-Fi disconnect: nmcli reported success for interface {device!r}.")
+    return {"device": device}
 
 
 def valid_admin_pin(config, form):
@@ -3410,6 +3507,7 @@ def restart_chromium_session(state):
             raise RuntimeError("Chromium cannot be restarted while an update is in progress.")
         state["requested_mode"] = "admin" if current_mode == "admin" else "app"
         state["local_admin_navigation_pending"] = False
+        state["local_app_navigation_pending"] = False
         state["chromium_process"] = None
     terminate_process(chromium_process)
     log(f"Chromium restart requested from local admin while in {current_mode} mode.")
@@ -3422,9 +3520,12 @@ def handle_admin_action(config, state, payload):
 
     action = str(payload.get("action") or "").strip()
     if action == "return_to_kiosk":
-        request_app_mode(state, "admin return to kiosk")
+        request_app_mode_local_navigation(state, "admin return to kiosk")
         log("Return to kiosk requested from local admin.")
-        return {"message": "Returning to the Stay Compass kiosk."}
+        return {
+            "message": "Returning to the Stay Compass kiosk.",
+            "pwa_url": config.get("pwa_url"),
+        }
     if action == "restart_chromium":
         return restart_chromium_session(state)
     if action == "check_updates":
@@ -3604,6 +3705,8 @@ def make_admin_handler(config, state):
                             state["admin_failed_attempts"] = 0
                             state["admin_lockout_until"] = now + ADMIN_LOCKOUT_SECONDS
                             state["requested_mode"] = "app"
+                            state["local_admin_navigation_pending"] = False
+                            state["local_app_navigation_pending"] = False
                             state["admin_deadline"] = 0.0
                             state["admin_unlocked"] = False
                             log("Admin access locked for 5 minutes after 3 failed PIN attempts.")
@@ -3711,6 +3814,33 @@ def make_admin_handler(config, state):
                                 "Wi-Fi connection saved. The kiosk will reopen "
                                 "Stay Compass after the internet check passes."
                             )
+                        }
+                    )
+                except Exception as error:
+                    self.send_json(
+                        {"error": str(error)},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                return
+
+            if path == "/api/wifi-disconnect":
+                form = self.read_form()
+
+                if not valid_admin_pin(config, form):
+                    self.send_json(
+                        {"error": "Invalid admin PIN."},
+                        status=HTTPStatus.UNAUTHORIZED,
+                    )
+                    return
+
+                try:
+                    result = disconnect_wifi()
+                    self.send_json(
+                        {
+                            "message": (
+                                "Wi-Fi disconnected. Saved network profiles were left intact."
+                            ),
+                            "device": result.get("device"),
                         }
                     )
                 except Exception as error:
@@ -3899,8 +4029,13 @@ def make_admin_handler(config, state):
                 return
 
             if path == "/api/open-app":
-                request_app_mode(state, "admin page button")
-                self.send_json({"message": "Opening Stay Compass..."})
+                request_app_mode_local_navigation(state, "admin page button")
+                self.send_json(
+                    {
+                        "message": "Opening Stay Compass...",
+                        "pwa_url": config.get("pwa_url"),
+                    }
+                )
                 return
 
             self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
@@ -3928,6 +4063,7 @@ def main():
         "lock": threading.Lock(),
         "requested_mode": None,
         "local_admin_navigation_pending": False,
+        "local_app_navigation_pending": False,
         "shutdown": False,
         "current_mode": None,
         "admin_unlocked": False,
@@ -3976,6 +4112,7 @@ def main():
             with state["lock"]:
                 requested_mode = state.get("requested_mode")
                 local_admin_navigation_pending = state.get("local_admin_navigation_pending", False)
+                local_app_navigation_pending = state.get("local_app_navigation_pending", False)
                 admin_deadline = state.get("admin_deadline", 0.0)
 
             if not online:
@@ -4010,6 +4147,7 @@ def main():
                 with state["lock"]:
                     state["requested_mode"] = None
                     state["local_admin_navigation_pending"] = False
+                    state["local_app_navigation_pending"] = False
             elif current_mode == "admin":
                 target_mode = "admin"
 
@@ -4025,6 +4163,18 @@ def main():
                     and chromium_process.poll() is None
                 ):
                     log("Opening admin mode without relaunch; Chromium is already navigating locally.")
+                    current_mode = target_mode
+                    with state["lock"]:
+                        state["current_mode"] = current_mode
+                elif (
+                    target_mode == "app"
+                    and requested_mode == "app"
+                    and local_app_navigation_pending
+                    and current_mode == "admin"
+                    and chromium_process is not None
+                    and chromium_process.poll() is None
+                ):
+                    log("Opening Stay Compass app without relaunch; Chromium is already navigating locally.")
                     current_mode = target_mode
                     with state["lock"]:
                         state["current_mode"] = current_mode
