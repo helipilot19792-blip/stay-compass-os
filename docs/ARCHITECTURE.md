@@ -40,6 +40,7 @@ The portal is intended to hold device-only workflows:
 
 - Wi-Fi scanning and connection changes
 - Device registration
+- Remote support enrollment and status
 - Local diagnostics
 - Update and restart controls
 
@@ -57,6 +58,16 @@ The updater uses the local fields in `device/config.json`:
 - `update_branch`
 
 The installer preserves existing per-device config values, including the admin PIN, so software updates do not reset local access settings.
+
+## Remote Support
+
+Stay Compass OS can enroll devices into Tailscale for secure remote support.
+
+- The local admin service stays unprivileged as the `compass` user.
+- Privileged Tailscale actions are limited to a root-owned installer and a root-owned helper invoked through narrow `sudoers` rules.
+- Devices use a persistent Stay Compass device ID stored outside the repository and derive a stable Tailscale hostname from it.
+- Remote SSH uses the existing OpenSSH server and `scadmin` account over the Tailnet.
+- Enrollment secrets are accepted only through the local admin page and are never stored in Git, `config.json`, or frontend code.
 
 ## Release Roadmap
 

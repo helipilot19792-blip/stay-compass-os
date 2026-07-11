@@ -9,7 +9,9 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 echo "Installing Stay Compass kiosk service..."
 
 sudo mkdir -p /opt/stay-compass
+sudo mkdir -p /opt/stay-compass/bin
 sudo mkdir -p /opt/stay-compass/device
+sudo mkdir -p /opt/stay-compass/scripts
 sudo mkdir -p "$BACKUP_DIR"
 
 sudo cp "$PROJECT_DIR/launcher/start-kiosk.sh" /opt/stay-compass/start-kiosk.sh
@@ -17,6 +19,12 @@ sudo chmod +x /opt/stay-compass/start-kiosk.sh
 
 sudo cp "$PROJECT_DIR/scripts/run-update.sh" /opt/stay-compass/run-update.sh
 sudo chmod +x /opt/stay-compass/run-update.sh
+
+sudo cp "$PROJECT_DIR/scripts/install-tailscale.sh" /opt/stay-compass/scripts/install-tailscale.sh
+sudo chmod 755 /opt/stay-compass/scripts/install-tailscale.sh
+
+sudo cp "$PROJECT_DIR/scripts/stay-compass-tailscale-helper.py" /opt/stay-compass/bin/stay-compass-tailscale-helper.py
+sudo chmod 755 /opt/stay-compass/bin/stay-compass-tailscale-helper.py
 
 sudo cp "$PROJECT_DIR/device/stay-compass-device.py" /opt/stay-compass/device/stay-compass-device.py
 sudo chmod +x /opt/stay-compass/device/stay-compass-device.py
@@ -92,6 +100,11 @@ fi
 
 sudo tee /etc/sudoers.d/stay-compass-update >/dev/null <<'EOF'
 compass ALL=(root) NOPASSWD: /opt/stay-compass/run-update.sh check, /opt/stay-compass/run-update.sh apply
+compass ALL=(root) NOPASSWD: /opt/stay-compass/scripts/install-tailscale.sh
+compass ALL=(root) NOPASSWD: /opt/stay-compass/bin/stay-compass-tailscale-helper.py status
+compass ALL=(root) NOPASSWD: /opt/stay-compass/bin/stay-compass-tailscale-helper.py enroll
+compass ALL=(root) NOPASSWD: /opt/stay-compass/bin/stay-compass-tailscale-helper.py down
+compass ALL=(root) NOPASSWD: /opt/stay-compass/bin/stay-compass-tailscale-helper.py logout
 EOF
 sudo chmod 440 /etc/sudoers.d/stay-compass-update
 
@@ -163,5 +176,9 @@ sudo systemctl daemon-reload
 sudo systemctl unmask getty@tty1.service >/dev/null 2>&1 || true
 sudo systemctl enable getty@tty1.service
 sudo systemctl disable stay-compass-kiosk.service >/dev/null 2>&1 || true
+
+if ! sudo /opt/stay-compass/scripts/install-tailscale.sh; then
+    echo "WARNING: Tailscale installation could not be completed. Stay Compass will continue without remote support."
+fi
 
 echo "Kiosk service installed."

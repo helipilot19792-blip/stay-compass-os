@@ -20,7 +20,8 @@ The installer suppresses visible firmware and kernel output on HDMI, then shows 
 10. After a successful update, the device service restarts itself into the newly installed code.
 11. If no update is available, the device service launches Chromium into the Stay Compass app.
 12. If network connectivity is unavailable, the device service opens a locked staff-access screen for Wi-Fi recovery.
-13. `stay-compass-boot-report.service` waits for a visible Chromium window and records boot timings.
+13. If Tailscale has already been enrolled, `tailscaled` reconnects in the background without blocking the kiosk.
+14. `stay-compass-boot-report.service` waits for a visible Chromium window and records boot timings.
 
 ## Files Managed By The Installer
 
@@ -31,7 +32,10 @@ The installer suppresses visible firmware and kernel output on HDMI, then shows 
 - `/etc/systemd/system/stay-compass-boot-report.service`
 - `/etc/sudoers.d/stay-compass-update`
 - `/opt/stay-compass/run-update.sh`
+- `/opt/stay-compass/scripts/install-tailscale.sh`
+- `/opt/stay-compass/bin/stay-compass-tailscale-helper.py`
 - `/opt/stay-compass/bin/stay-compass-boot-report.py`
+- `/var/lib/stay-compass/device-id`
 - `/var/lib/stay-compass/boot-performance/last-report.json`
 - `/var/lib/stay-compass/boot-performance/last-report.txt`
 

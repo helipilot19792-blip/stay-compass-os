@@ -11,6 +11,7 @@ sudo apt install -y \
     wget \
     chromium \
     network-manager \
+    openssh-server \
     fbi \
     xserver-xorg \
     xinit \

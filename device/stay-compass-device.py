@@ -7,6 +7,7 @@ Stay Compass Device Service
 import json
 import logging
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -39,6 +40,11 @@ UPDATE_HELPER = "/opt/stay-compass/run-update.sh"
 ADMIN_INACTIVITY_TIMEOUT_SECONDS = 30
 ADMIN_LOCKOUT_SECONDS = 5 * 60
 ADMIN_EXTENSION_DIR = "/opt/stay-compass/browser-extension/admin-hotspot"
+TAILSCALE_INSTALL_SCRIPT = "/opt/stay-compass/scripts/install-tailscale.sh"
+TAILSCALE_HELPER = "/opt/stay-compass/bin/stay-compass-tailscale-helper.py"
+TAILSCALE_DEVICE_ID_FILE = Path("/var/lib/stay-compass/device-id")
+TAILSCALE_ALLOWED_OPERATIONS = {"status", "enroll", "down", "logout"}
+TAILSCALE_SECRET_RE = re.compile(r"tskey-[A-Za-z0-9_-]+")
 
 CHROMIUM_BIN = "/usr/bin/chromium"
 NMCLI_BIN = "/usr/bin/nmcli"
@@ -1315,6 +1321,7 @@ ADMIN_HTML = """<!doctype html>
           <button class="nav-button" data-section="settings" type="button">Stay Compass Settings</button>
           <button class="nav-button" data-section="display" type="button">Display</button>
           <button class="nav-button" data-section="wifi" type="button">Wi-Fi</button>
+          <button class="nav-button" data-section="remote-support" type="button">Remote Support</button>
           <button class="nav-button" data-section="updates" type="button">Updates</button>
           <button class="nav-button" data-section="diagnostics" type="button">Diagnostics</button>
           <button class="nav-button" data-section="advanced" type="button">Advanced</button>
@@ -1510,6 +1517,57 @@ ADMIN_HTML = """<!doctype html>
             <div id="wifiMessage" class="message"></div>
           </div>
         </section>
+        <section id="section-remote-support" class="section-panel hidden">
+          <div class="section-header">
+            <div class="stack">
+              <h2>Remote Support</h2>
+              <p>Enroll this device in Tailscale for secure SSH support over the Tailnet without exposing router ports.</p>
+            </div>
+          </div>
+          <div class="card-grid">
+            <div class="card half">
+              <h3>Status</h3>
+              <dl class="kv">
+                <dt>Tailscale installed</dt><dd id="remoteSupportInstalled">-</dd>
+                <dt>Service status</dt><dd id="remoteSupportStatus">-</dd>
+                <dt>Device name</dt><dd id="remoteSupportDeviceName">-</dd>
+                <dt>Tailscale hostname</dt><dd id="remoteSupportHostname">-</dd>
+                <dt>Tailscale IP</dt><dd id="remoteSupportIp">-</dd>
+                <dt>Last error</dt><dd id="remoteSupportLastError">None</dd>
+              </dl>
+            </div>
+            <div class="card half">
+              <h3>Enable Remote Support</h3>
+              <div class="stack">
+                <label>
+                  Tailscale auth key
+                  <input id="remoteSupportAuthKey" type="password" autocomplete="off" spellcheck="false">
+                </label>
+                <label class="checkbox-row">
+                  <input id="toggleRemoteSupportAuthKey" type="checkbox">
+                  <span>Show key</span>
+                </label>
+                <div class="helper">The auth key is submitted only to the local device, used briefly for enrollment, and then cleared. OpenSSH remains the access method over Tailscale.</div>
+                <div class="inline-actions">
+                  <button id="enableRemoteSupport" type="button">Enable Remote Support</button>
+                  <button id="refreshRemoteSupport" class="secondary" type="button">Refresh Status</button>
+                </div>
+              </div>
+            </div>
+            <div class="card">
+              <h3>Disable / Logout</h3>
+              <div class="stack">
+                <div class="helper">Disconnect temporarily usually preserves enrollment. Logout removes this device from the Tailnet and requires a new auth key before remote SSH will work again.</div>
+                <div class="inline-actions">
+                  <button id="disconnectRemoteSupport" class="secondary" type="button">Disconnect Temporarily</button>
+                  <button id="logoutRemoteSupport" class="warning" type="button">Logout Remote Support</button>
+                </div>
+                <div class="helper">Either action can immediately terminate an active remote SSH session.</div>
+                <div id="remoteSupportMessage" class="message"></div>
+              </div>
+            </div>
+          </div>
+        </section>
         <section id="section-updates" class="section-panel hidden">
           <div class="section-header">
             <div class="stack">
@@ -1639,6 +1697,8 @@ ADMIN_HTML = """<!doctype html>
       displayWakeDurationSeconds: document.querySelector("#displayWakeDurationSeconds"),
       displayXrandrOutput: document.querySelector("#displayXrandrOutput"),
       disconnectWifi: document.querySelector("#disconnectWifi"),
+      disconnectRemoteSupport: document.querySelector("#disconnectRemoteSupport"),
+      enableRemoteSupport: document.querySelector("#enableRemoteSupport"),
       exitAdminMode: document.querySelector("#exitAdminMode"),
       globalNotice: document.querySelector("#globalNotice"),
       activeWifiSsid: document.querySelector("#activeWifiSsid"),
@@ -1670,7 +1730,16 @@ ADMIN_HTML = """<!doctype html>
       previewNightMode: document.querySelector("#previewNightMode"),
       refreshDiagnostics: document.querySelector("#refreshDiagnostics"),
       refreshOverview: document.querySelector("#refreshOverview"),
+      refreshRemoteSupport: document.querySelector("#refreshRemoteSupport"),
       restoreFullBrightness: document.querySelector("#restoreFullBrightness"),
+      remoteSupportAuthKey: document.querySelector("#remoteSupportAuthKey"),
+      remoteSupportDeviceName: document.querySelector("#remoteSupportDeviceName"),
+      remoteSupportHostname: document.querySelector("#remoteSupportHostname"),
+      remoteSupportInstalled: document.querySelector("#remoteSupportInstalled"),
+      remoteSupportIp: document.querySelector("#remoteSupportIp"),
+      remoteSupportLastError: document.querySelector("#remoteSupportLastError"),
+      remoteSupportMessage: document.querySelector("#remoteSupportMessage"),
+      remoteSupportStatus: document.querySelector("#remoteSupportStatus"),
       returnToKiosk: document.querySelector("#returnToKiosk"),
       saveAdminPin: document.querySelector("#saveAdminPin"),
       saveDisplaySettings: document.querySelector("#saveDisplaySettings"),
@@ -1682,8 +1751,10 @@ ADMIN_HTML = """<!doctype html>
       settingsPwaUrl: document.querySelector("#settingsPwaUrl"),
       ssid: document.querySelector("#ssid"),
       touchKeyboard: document.querySelector("#touchKeyboard"),
+      toggleRemoteSupportAuthKey: document.querySelector("#toggleRemoteSupportAuthKey"),
       toggleWifiPassword: document.querySelector("#toggleWifiPassword"),
       toggleUnlockPin: document.querySelector("#toggleUnlockPin"),
+      logoutRemoteSupport: document.querySelector("#logoutRemoteSupport"),
       unlock: document.querySelector("#unlock"),
       unlockPin: document.querySelector("#unlockPin"),
       updateActionHint: document.querySelector("#updateActionHint"),
@@ -1725,6 +1796,9 @@ ADMIN_HTML = """<!doctype html>
     }
     function syncWifiPasswordToggle() {
       els.password.type = els.toggleWifiPassword.checked ? "text" : "password";
+    }
+    function syncRemoteSupportAuthKeyToggle() {
+      els.remoteSupportAuthKey.type = els.toggleRemoteSupportAuthKey.checked ? "text" : "password";
     }
     function prepareUnlockPinInput() {
       unlockPinReadyAt = Date.now() + ADMIN_PIN_GUARD_MS;
@@ -1777,6 +1851,9 @@ ADMIN_HTML = """<!doctype html>
       }
       if (sectionName === "display" && adminPin) {
         loadDisplaySettings().catch((error) => setMessage(els.displayMessage, error.message, true));
+      }
+      if (sectionName === "remote-support" && adminPin) {
+        loadRemoteSupportStatus().catch((error) => setMessage(els.remoteSupportMessage, error.message, true));
       }
     }
     function showAdminShell() {
@@ -1851,6 +1928,16 @@ ADMIN_HTML = """<!doctype html>
         item.textContent = `[${String(entry.level || "info").toUpperCase()}] ${entry.message || ""}`;
         els.diagIssues.appendChild(item);
       }
+    }
+    function renderRemoteSupportStatus(status) {
+      els.remoteSupportInstalled.textContent = status.installed ? "Yes" : "No";
+      els.remoteSupportStatus.textContent = status.status_label || status.backend_state || "Unavailable";
+      els.remoteSupportDeviceName.textContent = status.device_name || "Unavailable";
+      els.remoteSupportHostname.textContent = status.tailscale_hostname || "Unavailable";
+      els.remoteSupportIp.textContent = status.tailscale_ip || "Unavailable";
+      els.remoteSupportLastError.textContent = status.last_error || "None";
+      els.disconnectRemoteSupport.disabled = !status.installed || !status.service_running;
+      els.logoutRemoteSupport.disabled = !status.installed;
     }
     function renderOverview(overview) {
       latestOverview = overview;
@@ -1985,6 +2072,46 @@ ADMIN_HTML = """<!doctype html>
       setMessage(els.wifiMessage, data.message || "Wi-Fi settings saved.");
       await Promise.all([refreshOverview(), scanNetworks()]);
     }
+    async function loadRemoteSupportStatus() {
+      const status = await api(`/api/remote-support?pin=${encodeURIComponent(adminPin)}`);
+      renderRemoteSupportStatus(status);
+      return status;
+    }
+    async function enableRemoteSupport() {
+      setMessage(els.remoteSupportMessage, "Enabling remote support...");
+      const authKey = els.remoteSupportAuthKey.value;
+      els.remoteSupportAuthKey.value = "";
+      syncRemoteSupportAuthKeyToggle();
+      const data = await api("/api/remote-support", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: adminPin, action: "enable", auth_key: authKey })
+      });
+      if (data.status) renderRemoteSupportStatus(data.status);
+      setMessage(els.remoteSupportMessage, data.message || "Remote support enabled.");
+    }
+    async function disconnectRemoteSupport() {
+      if (!window.confirm("Disconnect remote support now? This can immediately terminate an active SSH session.")) return;
+      setMessage(els.remoteSupportMessage, "Disconnecting remote support...");
+      const data = await api("/api/remote-support", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: adminPin, action: "disconnect" })
+      });
+      if (data.status) renderRemoteSupportStatus(data.status);
+      setMessage(els.remoteSupportMessage, data.message || "Remote support disconnected.");
+    }
+    async function logoutRemoteSupport() {
+      if (!window.confirm("Log out this device from Tailscale? Remote SSH access will stop and a new auth key will be required.")) return;
+      setMessage(els.remoteSupportMessage, "Logging out remote support...");
+      const data = await api("/api/remote-support", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin: adminPin, action: "logout", confirm: true })
+      });
+      if (data.status) renderRemoteSupportStatus(data.status);
+      setMessage(els.remoteSupportMessage, data.message || "Remote support logged out.");
+    }
     async function disconnectCurrentWifi() {
       if (!window.confirm("Disconnect Wi-Fi now? This may immediately terminate the current SSH or admin session.")) return;
       setMessage(els.wifiMessage, "Disconnecting Wi-Fi...");
@@ -2076,7 +2203,7 @@ ADMIN_HTML = """<!doctype html>
       await api("/api/unlock", { method: "POST", body });
       showAdminShell();
       setMessage(els.globalNotice, "Admin mode unlocked.");
-      await Promise.all([refreshOverview(), loadDisplaySettings(), scanNetworks(), loadDiagnostics()]);
+      await Promise.all([refreshOverview(), loadDisplaySettings(), scanNetworks(), loadDiagnostics(), loadRemoteSupportStatus()]);
     }
     function isKeyboardInput(element) {
       return Boolean(element && element.matches && element.matches(TEXT_INPUT_SELECTOR) && !element.disabled && !element.readOnly);
@@ -2255,6 +2382,10 @@ ADMIN_HTML = """<!doctype html>
     els.scan.addEventListener("click", () => scanNetworks().catch((error) => setMessage(els.wifiMessage, error.message, true)));
     els.connect.addEventListener("click", () => connectWifi().catch((error) => setMessage(els.wifiMessage, error.message, true)));
     els.disconnectWifi.addEventListener("click", () => disconnectCurrentWifi().catch((error) => setMessage(els.wifiMessage, error.message, true)));
+    els.refreshRemoteSupport.addEventListener("click", () => loadRemoteSupportStatus().catch((error) => setMessage(els.remoteSupportMessage, error.message, true)));
+    els.enableRemoteSupport.addEventListener("click", () => enableRemoteSupport().catch((error) => setMessage(els.remoteSupportMessage, error.message, true)));
+    els.disconnectRemoteSupport.addEventListener("click", () => disconnectRemoteSupport().catch((error) => setMessage(els.remoteSupportMessage, error.message, true)));
+    els.logoutRemoteSupport.addEventListener("click", () => logoutRemoteSupport().catch((error) => setMessage(els.remoteSupportMessage, error.message, true)));
     els.checkUpdates.addEventListener("click", () => runAdminAction("check_updates", els.updatesMessage).catch((error) => setMessage(els.updatesMessage, error.message, true)));
     els.installUpdate.addEventListener("click", () => runAdminAction("install_update", els.updatesMessage, "Install the latest available update now?").catch((error) => setMessage(els.updatesMessage, error.message, true)));
     els.refreshDiagnostics.addEventListener("click", () => loadDiagnostics().catch((error) => setMessage(els.diagnosticsMessage, error.message, true)));
@@ -2266,6 +2397,7 @@ ADMIN_HTML = """<!doctype html>
       syncUnlockPinToggle();
       if (Date.now() >= unlockPinReadyAt) els.unlockPin.focus();
     });
+    els.toggleRemoteSupportAuthKey.addEventListener("change", syncRemoteSupportAuthKeyToggle);
     els.toggleWifiPassword.addEventListener("change", syncWifiPasswordToggle);
     els.unlockPin.addEventListener("keydown", (event) => {
       if (Date.now() < unlockPinReadyAt) {
@@ -2284,6 +2416,7 @@ ADMIN_HTML = """<!doctype html>
       document.addEventListener(eventName, () => noteAdminActivity(), true);
     });
     initTouchKeyboard();
+    syncRemoteSupportAuthKeyToggle();
     syncWifiPasswordToggle();
     prepareUnlockPinInput();
     pollStatus().catch((error) => setMessage(els.globalNotice, error.message, true));
@@ -2292,6 +2425,7 @@ ADMIN_HTML = """<!doctype html>
       if (!adminPin || autoReturnNavigating) return;
       refreshOverview().catch(() => {});
       if (activeSection === "diagnostics") loadDiagnostics().catch(() => {});
+      if (activeSection === "remote-support") loadRemoteSupportStatus().catch(() => {});
     }, STATUS_POLL_MS);
   </script>
 </body>
@@ -2480,9 +2614,10 @@ def read_json_file(path):
         return None
 
 
-def run_command(command, timeout=30, cwd=None, env=None):
+def run_command(command, timeout=30, cwd=None, env=None, input_text=None):
     return subprocess.run(
         command,
+        input=input_text,
         capture_output=True,
         check=False,
         text=True,
@@ -3702,6 +3837,154 @@ def get_command_output(command_result):
     return (command_result.stdout or command_result.stderr).strip()
 
 
+def redact_remote_support_text(text):
+    if not text:
+        return ""
+    sanitized = str(text).replace("\r", " ").replace("\n", " ").strip()
+    sanitized = TAILSCALE_SECRET_RE.sub("<redacted>", sanitized)
+    return " ".join(sanitized.split())
+
+
+def read_stay_compass_device_id():
+    try:
+        value = TAILSCALE_DEVICE_ID_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+    if re.fullmatch(r"SC-\d{6}", value):
+        return value
+    return value or ""
+
+
+def set_remote_support_last_error(state, message):
+    with state["lock"]:
+        state["remote_support_last_error"] = redact_remote_support_text(message)
+
+
+def clear_remote_support_last_error(state):
+    with state["lock"]:
+        state["remote_support_last_error"] = ""
+
+
+def get_remote_support_last_error(state):
+    with state["lock"]:
+        return state.get("remote_support_last_error", "")
+
+
+def default_remote_support_status():
+    device_id = read_stay_compass_device_id()
+    hostname = ""
+    if re.fullmatch(r"SC-\d{6}", device_id):
+        hostname = f"stay-compass-{device_id.split('-', 1)[1].lower()}"
+
+    return {
+        "installed": False,
+        "service_running": False,
+        "backend_state": "Unavailable",
+        "connected": False,
+        "enrolled": False,
+        "status_label": "Unavailable",
+        "tailscale_ip": "",
+        "tailscale_hostname": hostname,
+        "device_name": device_id or socket.gethostname(),
+        "display_name": hostname or socket.gethostname(),
+        "last_error": "",
+    }
+
+
+def run_remote_support_helper(operation, input_text=None):
+    if operation not in TAILSCALE_ALLOWED_OPERATIONS:
+        raise RuntimeError("Unsupported remote support operation.")
+
+    command = [SUDO_BIN, TAILSCALE_HELPER, operation]
+    log(f"Remote support: running helper operation {operation!r}.")
+    result = run_command(command, timeout=90, env=None, input_text=input_text)
+
+    output_text = result.stdout.strip() if result.stdout else ""
+    error_text = redact_remote_support_text(get_command_output(result))
+
+    if result.returncode != 0:
+        raise RuntimeError(error_text or "Remote support helper failed.")
+
+    if not output_text:
+        raise RuntimeError("Remote support helper returned no output.")
+
+    try:
+        payload = json.loads(output_text)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"Remote support helper returned invalid JSON: {error}") from error
+
+    if isinstance(payload, dict) and payload.get("error"):
+        raise RuntimeError(redact_remote_support_text(payload.get("error")))
+
+    return payload
+
+
+def run_tailscale_installer():
+    log("Remote support: checking Tailscale installation.")
+    result = run_command([SUDO_BIN, TAILSCALE_INSTALL_SCRIPT], timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(
+            redact_remote_support_text(get_command_output(result))
+            or "Unable to install Tailscale right now."
+        )
+
+
+def get_remote_support_status(state):
+    status = default_remote_support_status()
+    try:
+        helper_status = run_remote_support_helper("status")
+        if isinstance(helper_status, dict):
+            status.update(helper_status)
+    except Exception as error:
+        redacted = redact_remote_support_text(str(error))
+        log(f"Remote support warning: status check failed ({redacted}).")
+        if not status.get("last_error"):
+            status["last_error"] = redacted
+
+    cached_error = get_remote_support_last_error(state)
+    if cached_error:
+        status["last_error"] = cached_error
+
+    status["last_error"] = redact_remote_support_text(status.get("last_error"))
+    return status
+
+
+def handle_remote_support_action(state, action, auth_key="", confirm=False):
+    normalized_action = str(action or "").strip().lower()
+
+    if normalized_action == "enable":
+        if not auth_key.strip():
+            raise RuntimeError("Paste a Tailscale auth key and try again.")
+        run_tailscale_installer()
+        result = run_remote_support_helper("enroll", input_text=auth_key.strip())
+        clear_remote_support_last_error(state)
+        return {
+            "message": result.get("message") or "Remote support enabled.",
+            "status": get_remote_support_status(state),
+        }
+
+    if normalized_action == "disconnect":
+        result = run_remote_support_helper("down")
+        clear_remote_support_last_error(state)
+        return {
+            "message": result.get("message") or "Remote support disconnected.",
+            "status": get_remote_support_status(state),
+        }
+
+    if normalized_action == "logout":
+        if not confirm:
+            raise RuntimeError("Confirm logout before removing this device from the Tailnet.")
+        result = run_remote_support_helper("logout")
+        clear_remote_support_last_error(state)
+        return {
+            "message": result.get("message") or "Remote support logged out.",
+            "status": get_remote_support_status(state),
+        }
+
+    raise RuntimeError("Unsupported remote support action.")
+
+
 def find_available_update(config, state):
     update_config = get_update_config(config)
 
@@ -3926,6 +4209,24 @@ def make_admin_handler(config, state):
                     )
                     return
                 self.send_json(collect_admin_overview(config, state))
+                return
+
+            if path == "/api/remote-support":
+                if not valid_admin_pin(config, query):
+                    self.send_json(
+                        {"error": "Invalid admin PIN."},
+                        status=HTTPStatus.UNAUTHORIZED,
+                    )
+                    return
+
+                try:
+                    self.send_json(get_remote_support_status(state))
+                except Exception as error:
+                    set_remote_support_last_error(state, str(error))
+                    self.send_json(
+                        {"error": "Unable to load remote support status right now."},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
                 return
 
             if path == "/api/display-settings":
@@ -4355,6 +4656,39 @@ def make_admin_handler(config, state):
                 )
                 return
 
+            if path == "/api/remote-support":
+                try:
+                    payload = self.read_json()
+                    if not valid_admin_pin(config, payload):
+                        self.send_json(
+                            {"error": "Invalid admin PIN."},
+                            status=HTTPStatus.FORBIDDEN,
+                        )
+                        return
+
+                    result = handle_remote_support_action(
+                        state,
+                        payload.get("action"),
+                        auth_key=str(payload.get("auth_key") or ""),
+                        confirm=bool(payload.get("confirm")),
+                    )
+                    self.send_json(result)
+                except RuntimeError as error:
+                    redacted = redact_remote_support_text(str(error))
+                    set_remote_support_last_error(state, redacted)
+                    self.send_json(
+                        {"error": redacted},
+                        status=HTTPStatus.BAD_REQUEST,
+                    )
+                except Exception:
+                    logging.exception("Unexpected remote support failure.")
+                    set_remote_support_last_error(state, "Remote support action failed.")
+                    self.send_json(
+                        {"error": "Unable to complete the remote support action right now."},
+                        status=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
+                return
+
             self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
 
     return AdminHandler
@@ -4393,6 +4727,7 @@ def main():
         "wifi_connect_started_at": 0.0,
         "wifi_connect_success_at": 0.0,
         "service_started_at": time.time(),
+        "remote_support_last_error": "",
         "activity_monitor_process": None,
         "display_last_applied": None,
         "display_last_reason": None,
